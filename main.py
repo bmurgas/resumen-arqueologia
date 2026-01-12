@@ -1,131 +1,178 @@
 import streamlit as st
 from docx import Document
 from docx.shared import Inches
+from docx.oxml.ns import qn
 import io
 
-# Configuración de la interfaz
 st.set_page_config(page_title="Generador de Resumen Arqueológico", layout="wide")
 
-def extraer_datos_con_imagenes(archivo_binario, nombre_archivo):
-    """Extrae texto e imágenes de los anexos diarios."""
+def obtener_imagenes_de_celda(celda, doc_source):
+    """
+    Busca imágenes (inline o ancladas/flotantes) dentro del XML de una celda.
+    """
+    imagenes_encontradas = []
+    
+    # 1. Buscar imágenes INLINE (las normales)
+    blips = celda._element.xpath('.//a:blip')
+    
+    # 2. Buscar imágenes ANCHORED (flotantes)
+    # A veces Word guarda las fotos dentro de estructuras 'graphicData' anidadas
+    if not blips:
+        blips = celda._element.xpath('.//pic:blipFill/a:blip')
+    
+    for blip in blips:
+        try:
+            embed_attr = blip.get(qn('r:embed'))
+            if embed_attr:
+                image_part = doc_source.part.related_parts[embed_attr]
+                # Verificar que sea realmente una imagen
+                if 'image' in image_part.content_type:
+                    imagenes_encontradas.append(image_part.blob)
+        except Exception as e:
+            continue
+            
+    return imagenes_encontradas
+
+def procesar_documento(archivo_bytes, nombre_archivo):
     try:
-        doc = Document(io.BytesIO(archivo_binario))
-    except Exception as e:
-        st.error(f"No se pudo abrir {nombre_archivo}. Asegúrate que sea un .docx válido.")
+        doc = Document(io.BytesIO(archivo_bytes))
+    except:
+        st.error(f"Error leyendo {nombre_archivo}")
         return []
 
-    fichas_extraidas = []
+    fichas = []
     
-    # Cada anexo puede tener una o más tablas (fichas)
-    for tabla in doc.tables:
-        ficha = {"fecha": None, "actividad": "", "fotos_binarias": []}
-        seccion_fotos = False
+    # Recorrer todas las tablas del anexo
+    for i, tabla in enumerate(doc.tables):
+        datos_ficha = {"fecha": None, "actividad": "", "fotos": []}
+        seccion_fotos_activa = False
         
         for fila in tabla.rows:
-            if len(fila.cells) < 2: continue
+            # Protección contra filas vacías
+            if not fila.cells: continue
             
-            # Limpieza de texto de la columna izquierda
-            encabezado = fila.cells[0].text.strip()
+            # Texto de la primera columna para identificar secciones
+            try:
+                texto_col1 = fila.cells[0].text.strip()
+            except:
+                texto_col1 = ""
+
+            # 1. FECHA
+            if "Fecha" in texto_col1 and len(fila.cells) > 1:
+                datos_ficha["fecha"] = fila.cells[1].text.strip()
+
+            # 2. ACTIVIDAD
+            if "Descripción de la actividad" in texto_col1 and len(fila.cells) > 1:
+                datos_ficha["actividad"] = fila.cells[1].text.strip()
             
-            # Captura de datos básicos
-            if "Fecha" in encabezado:
-                ficha["fecha"] = fila.cells[1].text.strip()
+            # 3. DETECTAR SECCIÓN FOTOS
+            # A veces dice "Registro fotográfico" o "Registro fotográfico actividad realizada"
+            if "Registro fotográfico" in texto_col1:
+                seccion_fotos_activa = True
+                continue # Saltamos la fila del título
             
-            if "Descripción de la actividad" in encabezado:
-                ficha["actividad"] = fila.cells[1].text.strip()
-            
-            # Identificación de la sección de fotos
-            if "Registro fotográfico" in encabezado:
-                seccion_fotos = True
-                continue
-            
-            # Extracción de imágenes reales
-            if seccion_fotos and ficha["fecha"]:
+            # 4. EXTRAER FOTOS
+            if seccion_fotos_activa and datos_ficha["fecha"]:
+                # Buscamos fotos en TODAS las celdas de esta fila
                 for celda in fila.cells:
-                    for parrafo in celda.paragraphs:
-                        for run in parrafo.runs:
-                            # Buscamos el rId de la imagen en el XML del documento
-                            blips = run._element.xpath('.//a:blip')
-                            for blip in blips:
-                                try:
-                                    rId = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
-                                    image_part = doc.part.related_parts[rId]
-                                    if 'image' in image_part.content_type:
-                                        ficha["fotos_binarias"].append(image_part.blob)
-                                except:
-                                    continue
+                    imgs = obtener_imagenes_de_celda(celda, doc)
+                    if imgs:
+                        datos_ficha["fotos"].extend(imgs)
 
-        # Si la tabla tenía una fecha, es una ficha válida
-        if ficha["fecha"]:
-            fichas_extraidas.append(ficha)
+        # Si encontramos fecha, guardamos la ficha
+        if datos_ficha["fecha"]:
+            fichas.append(datos_ficha)
             
-    return fichas_extraidas
+    return fichas
 
-def generar_documento_resumen(lista_total):
-    """Construye el Word final con la tabla de 3 columnas."""
-    nuevo_doc = Document()
-    nuevo_doc.add_heading('Tabla Resumen Monitoreo Arqueológico', 0)
+def generar_word_salida(datos_totales):
+    doc_final = Document()
+    doc_final.add_heading('Tabla Resumen Monitoreo', 0)
     
-    # Creamos la tabla con el formato del usuario (3 columnas)
-    tabla = nuevo_doc.add_table(rows=1, cols=3)
+    # Crear tabla idéntica a tu ejemplo: 3 columnas
+    tabla = doc_final.add_table(rows=1, cols=3)
     tabla.style = 'Table Grid'
+    tabla.autofit = False 
     
     # Encabezados
-    hdr = tabla.rows[0].cells
-    hdr[0].text = 'Fecha'
-    hdr[1].text = 'Actividades realizadas durante el MAP'
-    hdr[2].text = 'Imagen de la actividad'
+    headers = tabla.rows[0].cells
+    headers[0].text = "Fecha"
+    headers[1].text = "Actividades realizadas durante el MAP"
+    headers[2].text = "Imagen de la actividad"
+    
+    # Ajustar anchos (Aproximación para que se parezca al tuyo)
+    for cell in tabla.columns[0].cells: cell.width = Inches(0.8)
+    for cell in tabla.columns[1].cells: cell.width = Inches(3.5)
+    for cell in tabla.columns[2].cells: cell.width = Inches(2.5)
 
-    # Llenamos la tabla fila por fila (sin agrupar, respetando la regla 2.3)
-    for ficha in lista_total:
-        fila_celdas = tabla.add_row().cells
-        fila_celdas[0].text = ficha["fecha"]
-        fila_celdas[1].text = ficha["actividad"]
+    for item in datos_totales:
+        row = tabla.add_row().cells
         
-        # Insertar fotos en la tercera columna
-        parrafo_foto = fila_celdas[2].paragraphs[0]
-        if not ficha["fotos_binarias"]:
-            parrafo_foto.add_run("[Sin registro fotográfico]")
-            
-        for img_blob in ficha["fotos_binarias"]:
-            try:
-                run = parrafo_foto.add_run()
-                run.add_picture(io.BytesIO(img_blob), width=Inches(2.0))
-                parrafo_foto.add_run("\n") # Salto de línea entre fotos
-            except:
-                parrafo_foto.add_run("\n[Error en formato de imagen]\n")
-
-    # Guardar en memoria
+        # Columna 1: Fecha
+        row[0].text = item.get("fecha", "")
+        
+        # Columna 2: Actividad
+        # Limpiamos saltos de línea extra
+        actividad_limpia = item.get("actividad", "").replace("\n\n", "\n")
+        row[1].text = actividad_limpia
+        
+        # Columna 3: Imágenes
+        celda_img = row[2]
+        parrafo = celda_img.paragraphs[0]
+        
+        if not item["fotos"]:
+            parrafo.add_run("[Sin imágenes]")
+        else:
+            for img_blob in item["fotos"]:
+                try:
+                    run = parrafo.add_run()
+                    run.add_picture(io.BytesIO(img_blob), width=Inches(2.2))
+                    parrafo.add_run("\n") # Salto de línea entre foto y foto
+                except:
+                    pass
+                    
     buffer = io.BytesIO()
-    nuevo_doc.save(buffer)
+    doc_final.save(buffer)
     buffer.seek(0)
     return buffer
 
 # --- INTERFAZ STREAMLIT ---
-st.title("📂 Generador de Tabla Resumen MAP")
-st.write("Sube los anexos diarios (.docx) y genera el acumulado mensual automáticamente.")
+st.title("Generador de Tabla Resumen MAP (V3 - Extracción Profunda)")
 
-archivos_subidos = st.file_uploader("Subir archivos", type="docx", accept_multiple_files=True)
+st.warning("⚠️ Asegúrate de que tu requirements.txt tenga: python-docx, streamlit, lxml")
 
-if archivos_subidos:
-    if st.button("🛠️ Generar Word Final"):
-        datos_completos = []
+debug_mode = st.checkbox("Ver detalles del proceso (Diagnóstico)")
+archivos = st.file_uploader("Sube los anexos (.docx)", accept_multiple_files=True)
+
+if archivos and st.button("Generar Tabla"):
+    todos_los_datos = []
+    
+    barra = st.progress(0)
+    for i, archivo in enumerate(archivos):
+        # Procesar
+        datos = procesar_documento(archivo.read(), archivo.name)
+        todos_los_datos.extend(datos)
         
-        # Procesamos cada archivo subido
-        for archivo in archivos_subidos:
-            fichas = extraer_datos_con_imagenes(archivo.read(), archivo.name)
-            datos_completos.extend(fichas)
+        # Diagnóstico en pantalla
+        if debug_mode:
+            st.write(f"📄 **{archivo.name}**: Se encontraron {len(datos)} fichas.")
+            for d in datos:
+                st.write(f"- Fecha: {d['fecha']} | Fotos encontradas: {len(d['fotos'])}")
         
-        if datos_completos:
-            # Creamos el archivo final
-            archivo_word = generar_documento_resumen(datos_completos)
-            
-            st.success(f"Se procesaron {len(datos_completos)} fichas.")
-            st.download_button(
-                label="⬇️ Descargar Tabla Resumen.docx",
-                data=archivo_word,
-                file_name="Resumen_Monitoreo_Acumulado.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
-        else:
-            st.error("No se encontraron datos válidos en los archivos subidos.")
+        barra.progress((i + 1) / len(archivos))
+        
+    if todos_los_datos:
+        # Ordenar cronológicamente
+        todos_los_datos.sort(key=lambda x: x['fecha'] if x['fecha'] else "")
+        
+        doc_binario = generar_word_salida(todos_los_datos)
+        
+        st.success(f"¡Listo! Se generó una tabla con {len(todos_los_datos)} filas.")
+        st.download_button(
+            "⬇️ Descargar Tabla Resumen.docx",
+            data=doc_binario,
+            file_name="Tabla_Resumen_Final.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+    else:
+        st.error("No se pudo extraer información. Revisa el formato de los anexos.")

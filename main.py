@@ -3,85 +3,113 @@ from docx import Document
 from docx.shared import Inches
 import io
 
-def extraer_datos_fichas(archivo):
-    doc = Document(archivo)
-    fichas_del_archivo = []
+def extraer_fichas_con_fotos(archivo_binario):
+    # Abrimos el documento desde la memoria
+    doc = Document(io.BytesIO(archivo_binario))
+    lista_fichas = []
     
-    # Buscamos la estructura de la ficha
-    # Nota: Cada documento puede tener varias fichas (una tras otra)
-    # Identificamos el inicio por la celda "Fecha"
+    # Buscamos todas las tablas (cada ficha es una tabla o serie de tablas)
     for tabla in doc.tables:
-        datos = {"fecha": "", "actividad": "", "fotos": []}
-        capturando_fotos = False
+        ficha = {"fecha": "Sin fecha", "actividad": "", "imagenes": []}
+        en_seccion_fotos = False
         
         for fila in tabla.rows:
-            texto_id = fila.cells[0].text.strip()
+            # Limpiamos el texto de la primera celda para identificar la sección
+            if not fila.cells or len(fila.cells) < 2: continue
+            encabezado = fila.cells[0].text.strip()
             
-            if "Fecha" in texto_id:
-                datos["fecha"] = fila.cells[1].text.strip()
+            # 1. Capturar Fecha
+            if "Fecha" in encabezado:
+                ficha["fecha"] = fila.cells[1].text.strip()
             
-            if "Descripción de la actividad" in texto_id:
-                datos["actividad"] = fila.cells[1].text.strip()
-
-            # Localizar sección de fotos
-            if "Registro fotográfico" in texto_id:
-                capturando_fotos = True
-                continue
+            # 2. Capturar Actividad
+            if "Descripción de la actividad" in encabezado:
+                ficha["actividad"] = fila.cells[1].text.strip()
             
-            if capturando_fotos:
-                # Extraer imágenes de las celdas
+            # 3. Identificar sección de fotos
+            if "Registro fotográfico" in encabezado:
+                en_seccion_fotos = True
+                continue # Saltamos la fila del encabezado
+            
+            # 4. Extraer imágenes binarias si estamos en la sección correcta
+            if en_seccion_fotos:
                 for celda in fila.cells:
-                    for paragraph in celda.paragraphs:
-                        for run in paragraph.runs:
-                            if run._element.xpath('.//a:blip'):
-                                # Guardamos el objeto de imagen
-                                datos["fotos"].append(run)
-        
-        if datos["fecha"]:
-            fichas_del_archivo.append(datos)
+                    for parrafo in celda.paragraphs:
+                        for run in parrafo.runs:
+                            # Buscamos elementos de imagen (blip) en el XML del run
+                            blips = run._element.xpath('.//a:blip')
+                            for blip in blips:
+                                rId = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
+                                image_part = doc.part.related_parts[rId]
+                                # Guardamos los bytes de la imagen y su extensión
+                                ficha["imagenes"].append(image_part.blob)
+
+        # Si encontramos una fecha, asumimos que es una ficha válida y la guardamos
+        if ficha["fecha"] != "Sin fecha":
+            lista_fichas.append(ficha)
             
-    return fichas_del_archivo
+    return lista_fichas
 
-def generar_word_resumen(datos_totales):
-    nuevo_doc = Document()
-    nuevo_doc.add_heading('Tabla Resumen Monitoreo Arqueológico', 0)
+def crear_word_final(datos_acumulados):
+    dest_doc = Document()
+    # Configuración de la tabla: 3 columnas [Fecha, Actividad, Imagen]
+    tabla_final = dest_doc.add_table(rows=1, cols=3)
+    tabla_final.style = 'Table Grid'
     
-    # Crear tabla de 3 columnas según tu formato
-    tabla = nuevo_doc.add_table(rows=1, cols=3)
-    tabla.style = 'Table Grid'
-    hdr_cells = tabla.rows[0].cells
-    hdr_cells[0].text = 'Fecha'
-    hdr_cells[1].text = 'Actividades realizadas durante el MAP'
-    hdr_cells[2].text = 'Imagen de la actividad'
+    # Encabezados
+    etiquetas = ['Fecha', 'Actividades realizadas durante el MAP', 'Imagen de la actividad']
+    for i, texto in enumerate(etiquetas):
+        tabla_final.rows[0].cells[i].text = texto
 
-    # Ordenar por fecha antes de escribir
-    datos_ordenados = sorted(datos_totales, key=lambda x: x['fecha'])
-
-    for item in datos_ordenados:
-        row_cells = tabla.add_row().cells
-        row_cells[0].text = item['fecha']
-        row_cells[1].text = item['actividad']
+    # Llenado de filas (sin agrupar, una por ficha encontrada)
+    for ficha in datos_acumulados:
+        row = tabla_final.add_row().cells
+        row[0].text = ficha["fecha"]
+        row[1].text = ficha["actividad"]
         
-        # Insertar fotos en la tercera columna
-        paragraph = row_cells[2].paragraphs[0]
-        for foto_run in item['fotos']:
-            # Aquí la lógica para copiar la imagen de un doc a otro
-            # Nota: python-docx requiere extraer el stream de la imagen original
-            pass # (La lógica de copiado de imagen binaria se añade en la versión final)
+        # Insertar imágenes en la tercera columna
+        parrafo_foto = row[2].paragraphs[0]
+        for img_blob in ficha["imagenes"]:
+            run = parrafo_foto.add_run()
+            # Insertamos la imagen desde el flujo de bytes
+            run.add_picture(io.BytesIO(img_blob), width=Inches(2.0))
+            parrafo_foto.add_run("\n") # Espacio entre fotos si hay varias
 
-    target = io.BytesIO()
-    nuevo_doc.save(target)
-    return target.getvalue()
+    # Guardar resultado en memoria para descarga
+    salida_memoria = io.BytesIO()
+    dest_doc.save(salida_memoria)
+    salida_memoria.seek(0)
+    return salida_memoria
 
-# Interfaz Streamlit
-st.title("Generador de Resumen Arqueológico")
-uploaded_files = st.file_uploader("Sube los anexos diarios", type="docx", accept_multiple_files=True)
+# --- INTERFAZ DE USUARIO (STREAMLIT) ---
+st.set_page_config(page_title="ArqueoTab Gen", layout="wide")
+st.title("📂 Generador de Tabla Resumen Arqueológica")
+st.info("Sube tus archivos de Anexo (Word) y la app creará la tabla acumulada con fotos.")
 
-if uploaded_files:
-    lista_total = []
-    for f in uploaded_files:
-        lista_total.extend(extraer_datos_fichas(f))
+archivos = st.file_uploader("Selecciona los archivos .docx", type="docx", accept_multiple_files=True)
+
+if archivos:
+    if st.button("🚀 Procesar y Generar Tabla"):
+        todas_las_fichas = []
+        for a in archivos:
+            fichas_archivo = extraer_fichas_con_fotos(a.read())
+            todas_las_fichas.extend(fichas_archivo)
+        
+        if todas_las_fichas:
+            # Generamos el archivo
+            archivo_final = crear_word_final(todas_las_fichas)
+            
+            st.success(f"Se procesaron {len(todas_las_fichas)} fichas correctamente.")
+            st.download_button(
+                label="⬇️ Descargar Tabla Resumen (.docx)",
+                data=archivo_final,
+                file_name="Tabla_Resumen_MAP_Acumulada.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+        else:
+            st.error("No se detectaron fichas válidas en los archivos subidos.")
     
     if st.button("Generar Word Final"):
         doc_binario = generar_word_resumen(lista_total)
+
         st.download_button("Descargar Tabla Resumen.docx", doc_binario, "Resumen_MAP.docx")

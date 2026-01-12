@@ -16,7 +16,7 @@ def obtener_imagenes_seguro(celda, doc_relacionado):
     # Intentamos acceder al elemento XML crudo
     try:
         xml_element = celda._element
-    exceptAttributeError:
+    except AttributeError:
         return []
 
     # 1. Búsqueda estándar (imágenes inline)
@@ -61,7 +61,6 @@ def escanear_documento_v5(archivo_bytes, nombre_archivo):
         
         for fila in tabla.rows:
             # Convertimos toda la fila a una sola cadena de texto para buscar palabras clave
-            # Esto ayuda si el formato cambia ligeramente entre fichas
             texto_fila = " ".join([c.text.strip() for c in fila.cells]).strip()
             
             # --- 1. DETECTAR FECHA ---
@@ -153,8 +152,8 @@ def generar_word_final(datos):
     return buffer
 
 # --- INTERFAZ DE USUARIO ---
-st.title("Generador MAP V5 (Corrección de Imágenes)")
-st.info("Sube los anexos. Esta versión corrige el error 'TypeError' y busca mejor el texto.")
+st.title("Generador MAP V5.1 (Corrección de Sintaxis)")
+st.info("Sube los anexos. Versión corregida.")
 
 # Checkbox para ver qué está pasando internamente
 ver_logs = st.checkbox("Mostrar detalles de extracción (Útil si algo sale vacío)")

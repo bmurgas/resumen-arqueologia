@@ -4,194 +4,184 @@ from docx.shared import Inches
 from docx.oxml.ns import qn
 import io
 
-# Configuración de la página
-st.set_page_config(page_title="Generador de Resumen Arqueológico", layout="wide")
+st.set_page_config(page_title="Generador MAP V6 (Memoria Persistente)", layout="wide")
 
-def obtener_imagenes_seguro(celda, doc_relacionado):
+def obtener_imagenes_xml(elemento_padre, doc_relacionado):
     """
-    Busca imágenes dentro de una celda sin causar errores de namespace.
+    Busca imágenes recursivamente en el XML del elemento (fila o celda).
+    Encuentra imágenes inline, ancladas, en grupos, etc.
     """
     imagenes = []
+    # Buscamos cualquier etiqueta 'blip' en cualquier profundidad
+    # 'a:blip' es la etiqueta estándar para imágenes en Word OpenXML
+    blips = elemento_padre.xpath('.//a:blip')
     
-    # Intentamos acceder al elemento XML crudo
-    try:
-        xml_element = celda._element
-    except AttributeError:
-        return []
-
-    # 1. Búsqueda estándar (imágenes inline)
-    # python-docx ya sabe qué es 'a:blip', no necesitamos pasar namespaces
-    blips = xml_element.xpath('.//a:blip')
-    
-    # 2. Búsqueda de respaldo (imágenes ancladas/flotantes)
-    if not blips:
-        blips = xml_element.xpath('.//pic:blipFill/a:blip')
-
     for blip in blips:
         try:
-            # Obtenemos el ID de la relación (r:embed)
-            # Usamos qn de python-docx para obtener el nombre cualificado correcto
+            # Extraer el ID de la relación (r:embed)
             embed_code = blip.get(qn('r:embed'))
-            
             if embed_code:
                 part = doc_relacionado.part.related_parts[embed_code]
-                # Verificamos que sea imagen
                 if 'image' in part.content_type:
                     imagenes.append(part.blob)
-        except Exception as e:
-            # Si una imagen falla, la saltamos pero seguimos con las demás
+        except:
             continue
-            
     return imagenes
 
-def escanear_documento_v5(archivo_bytes, nombre_archivo):
+def procesar_archivo_inteligente(archivo_bytes, nombre_archivo):
     try:
         doc = Document(io.BytesIO(archivo_bytes))
     except Exception as e:
-        st.error(f"No se pudo leer el archivo {nombre_archivo}: {e}")
-        return [], []
+        st.error(f"Error leyendo {nombre_archivo}: {e}")
+        return []
 
-    fichas = []
-    logs = []
+    fichas_extraidas = []
     
-    # Recorremos todas las tablas
-    for i, tabla in enumerate(doc.tables):
-        ficha = {"fecha": None, "actividad": "", "fotos": []}
-        buscando_fotos = False
-        
+    # MEMORIA PERSISTENTE
+    # Estas variables recuerdan el estado aunque cambiemos de tabla
+    estado_actual = {
+        "fecha": None,
+        "actividad": "",
+        "fotos": [],
+        "origen": nombre_archivo
+    }
+    
+    # Bandera para saber si estamos en zona de fotos
+    capturando_fotos = False
+
+    # Recorremos TODAS las tablas del documento en orden
+    for tabla in doc.tables:
         for fila in tabla.rows:
-            # Convertimos toda la fila a una sola cadena de texto para buscar palabras clave
+            # Texto completo de la fila para búsqueda flexible
             texto_fila = " ".join([c.text.strip() for c in fila.cells]).strip()
             
-            # --- 1. DETECTAR FECHA ---
-            if "Fecha" in texto_fila and not ficha["fecha"]:
-                # Buscamos la celda que tiene la palabra "Fecha"
-                for j, celda in enumerate(fila.cells):
-                    if "Fecha" in celda.text:
-                        # Asumimos que la fecha está en la celda siguiente (j+1)
-                        if j + 1 < len(fila.cells):
-                            valor = fila.cells[j+1].text.strip()
-                            if valor: # Solo si no está vacío
-                                ficha["fecha"] = valor
-                                logs.append(f"✅ Fecha detectada: {valor}")
-                        break
-            
-            # --- 2. DETECTAR ACTIVIDAD ---
-            # Buscamos variantes comunes del título
-            if "Descripción de la actividad" in texto_fila or "Actividad" in texto_fila:
-                for j, celda in enumerate(fila.cells):
-                    # Si encontramos el título en esta celda...
-                    if "Descripción" in celda.text or "Actividad" in celda.text:
-                        # ... el contenido debería estar a la derecha
-                        if j + 1 < len(fila.cells):
-                            texto = fila.cells[j+1].text.strip()
-                            # Guardamos si es un texto relevante (más largo que el título)
-                            if len(texto) > 1:
-                                ficha["actividad"] = texto
-                        break
-
-            # --- 3. DETECTAR SECCIÓN FOTOS ---
-            if "Registro fotográfico" in texto_fila or "Imagen de la actividad" in texto_fila:
-                buscando_fotos = True
-                continue # Saltamos la línea del título
-
-            # --- 4. EXTRAER FOTOS ---
-            if buscando_fotos:
-                # Si estamos en la zona de fotos, escaneamos TODAS las celdas de la fila
+            # --- 1. DETECCIÓN DE FECHA ---
+            # Si encontramos una NUEVA fecha, guardamos la ficha anterior y empezamos una nueva
+            if "Fecha" in texto_fila:
+                # Buscar el valor de la fecha en la fila (buscamos algo que parezca fecha o esté en celda derecha)
+                fecha_encontrada = None
                 for celda in fila.cells:
-                    imgs = obtener_imagenes_seguro(celda, doc)
+                    txt = celda.text.strip()
+                    # Si la celda no es la palabra clave "Fecha" y tiene longitud razonable, es el valor
+                    if "Fecha" not in txt and len(txt) > 5: 
+                        fecha_encontrada = txt
+                        break
+                
+                if fecha_encontrada:
+                    # Si ya teníamos una ficha abierta con fecha, la cerramos y guardamos
+                    if estado_actual["fecha"]:
+                        fichas_extraidas.append(estado_actual)
+                        # Reiniciamos estado
+                        estado_actual = {
+                            "fecha": None, "actividad": "", "fotos": [], "origen": nombre_archivo
+                        }
+                    
+                    # Iniciamos la nueva fecha
+                    estado_actual["fecha"] = fecha_encontrada
+                    capturando_fotos = False # Reseteamos fotos al cambiar fecha
+
+            # --- 2. DETECCIÓN DE ACTIVIDAD ---
+            # Solo buscamos actividad si ya tenemos fecha activa
+            if estado_actual["fecha"]:
+                if "Descripción de la actividad" in texto_fila or "Actividad" in texto_fila:
+                    # Buscamos la celda con el texto más largo en esta fila
+                    texto_mas_largo = ""
+                    for celda in fila.cells:
+                        txt = celda.text.strip()
+                        # Ignoramos los títulos
+                        if "Descripción" in txt or "Actividad" in txt: continue
+                        if len(txt) > len(texto_mas_largo):
+                            texto_mas_largo = txt
+                    
+                    if len(texto_mas_largo) > 2:
+                        estado_actual["actividad"] = texto_mas_largo
+
+            # --- 3. DETECCIÓN DE FOTOS ---
+            if "Registro fotográfico" in texto_fila:
+                capturando_fotos = True
+                continue # No buscamos fotos en la fila del título
+
+            if capturando_fotos and estado_actual["fecha"]:
+                # Buscamos fotos en el XML de toda la fila
+                try:
+                    imgs = obtener_imagenes_xml(fila._element, doc)
                     if imgs:
-                        ficha["fotos"].extend(imgs)
+                        estado_actual["fotos"].extend(imgs)
+                except:
+                    pass
 
-        # Si al terminar de leer la tabla (ficha) tenemos fecha, la guardamos
-        if ficha["fecha"]:
-            fichas.append(ficha)
+    # Al terminar el documento, guardamos la última ficha si quedó pendiente
+    if estado_actual["fecha"]:
+        fichas_extraidas.append(estado_actual)
 
-    return fichas, logs
+    return fichas_extraidas
 
-def generar_word_final(datos):
+def generar_word_v6(datos):
     doc = Document()
-    doc.add_heading('Tabla Resumen Monitoreo Arqueológico', 0)
+    doc.add_heading('Tabla Resumen Monitoreo', 0)
     
     tabla = doc.add_table(rows=1, cols=3)
     tabla.style = 'Table Grid'
     tabla.autofit = False
     
-    # Configurar encabezados
-    hdr = tabla.rows[0].cells
-    hdr[0].text = "Fecha"
-    hdr[1].text = "Actividades realizadas durante el MAP"
-    hdr[2].text = "Imagen de la actividad"
+    headers = tabla.rows[0].cells
+    headers[0].text = "Fecha"
+    headers[1].text = "Actividades realizadas durante el MAP"
+    headers[2].text = "Imagen de la actividad"
     
-    # Anchos
-    for c in tabla.columns[0].cells: c.width = Inches(0.9) # Fecha
-    for c in tabla.columns[1].cells: c.width = Inches(3.5) # Actividad
-    for c in tabla.columns[2].cells: c.width = Inches(2.5) # Fotos
-    
+    # Ajuste de anchos
+    for c in tabla.columns[0].cells: c.width = Inches(0.9)
+    for c in tabla.columns[1].cells: c.width = Inches(3.5)
+    for c in tabla.columns[2].cells: c.width = Inches(2.5)
+
     for item in datos:
         row = tabla.add_row().cells
         row[0].text = str(item["fecha"])
         row[1].text = str(item["actividad"])
         
-        # Columna de Fotos
-        parrafo_img = row[2].paragraphs[0]
+        celda_img = row[2]
+        p = celda_img.paragraphs[0]
+        
         if not item["fotos"]:
-            parrafo_img.add_run("[Sin fotos detectadas]")
+            p.add_run("[Sin fotos]")
         else:
-            for img_bytes in item["fotos"]:
+            for img_blob in item["fotos"]:
                 try:
-                    run = parrafo_img.add_run()
-                    run.add_picture(io.BytesIO(img_bytes), width=Inches(2.1))
-                    parrafo_img.add_run("\n")
+                    run = p.add_run()
+                    run.add_picture(io.BytesIO(img_blob), width=Inches(2.0))
+                    p.add_run("\n")
                 except:
                     pass
-                
+    
     buffer = io.BytesIO()
     doc.save(buffer)
     buffer.seek(0)
     return buffer
 
-# --- INTERFAZ DE USUARIO ---
-st.title("Generador MAP V5.1 (Corrección de Sintaxis)")
-st.info("Sube los anexos. Versión corregida.")
+# --- INTERFAZ ---
+st.title("Generador MAP V6 (Memoria Persistente)")
+st.info("Esta versión soluciona el problema cuando las fotos o textos están en tablas divididas.")
 
-# Checkbox para ver qué está pasando internamente
-ver_logs = st.checkbox("Mostrar detalles de extracción (Útil si algo sale vacío)")
+archivos = st.file_uploader("Sube Anexos", accept_multiple_files=True)
+debug = st.checkbox("Ver Logs de Extracción")
 
-archivos = st.file_uploader("Sube Anexos Word (.docx)", accept_multiple_files=True)
+if archivos and st.button("Generar Tabla"):
+    todas = []
+    for arch in archivos:
+        fichas = procesar_archivo_inteligente(arch.read(), arch.name)
+        todas.extend(fichas)
+        
+        if debug:
+            st.write(f"📂 {arch.name}: {len(fichas)} fichas detectadas.")
+            for f in fichas:
+                st.write(f"   - Fecha: {f['fecha']} | Actividad: {len(f['actividad'])} caracteres | Fotos: {len(f['fotos'])}")
 
-if archivos and st.button("Generar Tabla Resumen"):
-    fichas_totales = []
-    
-    barra = st.progress(0)
-    
-    for i, archivo in enumerate(archivos):
-        bytes_archivo = archivo.read()
-        fichas, logs = escanear_documento_v5(bytes_archivo, archivo.name)
-        fichas_totales.extend(fichas)
+    if todas:
+        # Ordenar cronológicamente
+        todas.sort(key=lambda x: x['fecha'] if x['fecha'] else "ZZZ")
         
-        # Mostrar logs si el usuario quiere
-        if ver_logs:
-            st.text(f"--- Procesando: {archivo.name} ---")
-            for l in logs:
-                st.text(l)
-            if not fichas:
-                st.warning(f"⚠️ No se detectaron fichas en {archivo.name}")
-        
-        barra.progress((i + 1) / len(archivos))
-        
-    if fichas_totales:
-        # Ordenar por fecha (simple string sort)
-        fichas_totales.sort(key=lambda x: x['fecha'] if x['fecha'] else "ZZZ")
-        
-        doc_final = generar_word_final(fichas_totales)
-        
-        st.success(f"¡Proceso completado! Se generaron {len(fichas_totales)} filas.")
-        st.download_button(
-            label="⬇️ Descargar Tabla Resumen.docx",
-            data=doc_final,
-            file_name="Resumen_Acumulado_MAP.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
+        word_out = generar_word_v6(todas)
+        st.success(f"¡Éxito! Tabla generada con {len(todas)} filas.")
+        st.download_button("Descargar Tabla Resumen.docx", word_out, "Tabla_Resumen.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
     else:
-        st.error("No se pudo extraer ninguna ficha válida. Revisa los mensajes de detalle arriba.")
+        st.error("No se encontraron datos. Verifica si los archivos tienen la palabra 'Fecha'.")

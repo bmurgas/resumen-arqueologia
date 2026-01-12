@@ -1,178 +1,171 @@
 import streamlit as st
 from docx import Document
 from docx.shared import Inches
-from docx.oxml.ns import qn
 import io
+from lxml import etree
 
+# Configuración de página
 st.set_page_config(page_title="Generador de Resumen Arqueológico", layout="wide")
 
-def obtener_imagenes_de_celda(celda, doc_source):
-    """
-    Busca imágenes (inline o ancladas/flotantes) dentro del XML de una celda.
-    """
-    imagenes_encontradas = []
-    
-    # 1. Buscar imágenes INLINE (las normales)
-    blips = celda._element.xpath('.//a:blip')
-    
-    # 2. Buscar imágenes ANCHORED (flotantes)
-    # A veces Word guarda las fotos dentro de estructuras 'graphicData' anidadas
-    if not blips:
-        blips = celda._element.xpath('.//pic:blipFill/a:blip')
+# Mapas de nombres (Namespaces) para encontrar imágenes escondidas en el XML de Word
+NAMESPACES = {
+    'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
+    'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture',
+    'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing',
+    'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+}
+
+def obtener_imagenes_profundo(celda, doc_relacionado):
+    """Busca imágenes usando XPATH y namespaces explícitos."""
+    imagenes = []
+    # Buscamos la etiqueta 'blip' (imagen) en cualquier profundidad dentro de la celda
+    # Esto encuentra imágenes inline, ancladas, en tablas anidadas, etc.
+    blips = celda._element.xpath('.//a:blip', namespaces=NAMESPACES)
     
     for blip in blips:
         try:
-            embed_attr = blip.get(qn('r:embed'))
-            if embed_attr:
-                image_part = doc_source.part.related_parts[embed_attr]
-                # Verificar que sea realmente una imagen
-                if 'image' in image_part.content_type:
-                    imagenes_encontradas.append(image_part.blob)
+            # Obtenemos el ID de la relación (r:embed)
+            embed_code = blip.get(f"{{{NAMESPACES['r']}}}embed")
+            if embed_code:
+                part = doc_relacionado.part.related_parts[embed_code]
+                if 'image' in part.content_type:
+                    imagenes.append(part.blob)
         except Exception as e:
             continue
-            
-    return imagenes_encontradas
+    return imagenes
 
-def procesar_documento(archivo_bytes, nombre_archivo):
+def escanear_documento(archivo_bytes, nombre_archivo):
     try:
         doc = Document(io.BytesIO(archivo_bytes))
     except:
-        st.error(f"Error leyendo {nombre_archivo}")
-        return []
+        st.error(f"Error crítico leyendo {nombre_archivo}")
+        return [], []
 
-    fichas = []
+    fichas_encontradas = []
+    logs = [] # Para mostrar en pantalla qué está pasando
     
-    # Recorrer todas las tablas del anexo
+    # Recorremos todas las tablas
     for i, tabla in enumerate(doc.tables):
-        datos_ficha = {"fecha": None, "actividad": "", "fotos": []}
-        seccion_fotos_activa = False
+        ficha_actual = {"fecha": None, "actividad": "", "fotos": []}
+        buscando_fotos = False
         
         for fila in tabla.rows:
-            # Protección contra filas vacías
-            if not fila.cells: continue
+            # Convertimos toda la fila a texto para buscar palabras clave sin importar la columna
+            texto_fila = " ".join([c.text.strip() for c in fila.cells]).strip()
             
-            # Texto de la primera columna para identificar secciones
-            try:
-                texto_col1 = fila.cells[0].text.strip()
-            except:
-                texto_col1 = ""
-
-            # 1. FECHA
-            if "Fecha" in texto_col1 and len(fila.cells) > 1:
-                datos_ficha["fecha"] = fila.cells[1].text.strip()
-
-            # 2. ACTIVIDAD
-            if "Descripción de la actividad" in texto_col1 and len(fila.cells) > 1:
-                datos_ficha["actividad"] = fila.cells[1].text.strip()
+            # 1. DETECTAR FECHA
+            if "Fecha" in texto_fila and ficha_actual["fecha"] is None:
+                # Intentamos buscar el valor de la fecha.
+                # Estrategia: Buscar la celda que tenga "Fecha" y tomar la siguiente.
+                for j, celda in enumerate(fila.cells):
+                    if "Fecha" in celda.text:
+                        # Intentamos tomar la celda de la derecha
+                        if j + 1 < len(fila.cells):
+                            ficha_actual["fecha"] = fila.cells[j+1].text.strip()
+                            logs.append(f"✅ Fecha encontrada en tabla {i}: {ficha_actual['fecha']}")
+                        break
             
+            # 2. DETECTAR ACTIVIDAD (Buscamos coincidencias parciales)
+            if "Descripción de la actividad" in texto_fila or "Actividad" in texto_fila:
+                # Evitamos confundir el encabezado con el contenido si están en la misma fila
+                for j, celda in enumerate(fila.cells):
+                    if "Descripción" in celda.text or "Actividad" in celda.text:
+                         if j + 1 < len(fila.cells):
+                             texto_act = fila.cells[j+1].text.strip()
+                             if texto_act and texto_act != ficha_actual["actividad"]:
+                                 ficha_actual["actividad"] = texto_act
+                                 logs.append(f"📝 Actividad detectada: {texto_act[:30]}...")
+                         break
+
             # 3. DETECTAR SECCIÓN FOTOS
-            # A veces dice "Registro fotográfico" o "Registro fotográfico actividad realizada"
-            if "Registro fotográfico" in texto_col1:
-                seccion_fotos_activa = True
-                continue # Saltamos la fila del título
-            
+            if "Registro fotográfico" in texto_fila or "Imagen de la actividad" in texto_fila:
+                buscando_fotos = True
+                continue # Saltamos la línea del título
+
             # 4. EXTRAER FOTOS
-            if seccion_fotos_activa and datos_ficha["fecha"]:
-                # Buscamos fotos en TODAS las celdas de esta fila
+            if buscando_fotos:
+                # Buscamos en CADA celda de la fila actual
+                fotos_fila = []
                 for celda in fila.cells:
-                    imgs = obtener_imagenes_de_celda(celda, doc)
-                    if imgs:
-                        datos_ficha["fotos"].extend(imgs)
+                    imgs = obtener_imagenes_profundo(celda, doc)
+                    fotos_fila.extend(imgs)
+                
+                if fotos_fila:
+                    ficha_actual["fotos"].extend(fotos_fila)
+                    logs.append(f"📷 {len(fotos_fila)} foto(s) extraída(s).")
+        
+        # Guardamos la ficha si tiene al menos fecha
+        if ficha_actual["fecha"]:
+            fichas_encontradas.append(ficha_actual)
 
-        # Si encontramos fecha, guardamos la ficha
-        if datos_ficha["fecha"]:
-            fichas.append(datos_ficha)
-            
-    return fichas
+    return fichas_encontradas, logs
 
-def generar_word_salida(datos_totales):
-    doc_final = Document()
-    doc_final.add_heading('Tabla Resumen Monitoreo', 0)
+def generar_word_final(datos):
+    doc = Document()
+    doc.add_heading('Tabla Resumen Monitoreo', 0)
     
-    # Crear tabla idéntica a tu ejemplo: 3 columnas
-    tabla = doc_final.add_table(rows=1, cols=3)
+    tabla = doc.add_table(rows=1, cols=3)
     tabla.style = 'Table Grid'
-    tabla.autofit = False 
+    tabla.autofit = False
     
-    # Encabezados
-    headers = tabla.rows[0].cells
-    headers[0].text = "Fecha"
-    headers[1].text = "Actividades realizadas durante el MAP"
-    headers[2].text = "Imagen de la actividad"
+    hdr = tabla.rows[0].cells
+    hdr[0].text = "Fecha"
+    hdr[1].text = "Actividades realizadas durante el MAP"
+    hdr[2].text = "Imagen de la actividad"
     
-    # Ajustar anchos (Aproximación para que se parezca al tuyo)
-    for cell in tabla.columns[0].cells: cell.width = Inches(0.8)
-    for cell in tabla.columns[1].cells: cell.width = Inches(3.5)
-    for cell in tabla.columns[2].cells: cell.width = Inches(2.5)
-
-    for item in datos_totales:
+    # Anchos fijos para que se vea bien
+    for c in tabla.columns[0].cells: c.width = Inches(0.9)
+    for c in tabla.columns[1].cells: c.width = Inches(3.5)
+    for c in tabla.columns[2].cells: c.width = Inches(2.5)
+    
+    for item in datos:
         row = tabla.add_row().cells
+        row[0].text = str(item["fecha"])
+        row[1].text = str(item["actividad"])
         
-        # Columna 1: Fecha
-        row[0].text = item.get("fecha", "")
-        
-        # Columna 2: Actividad
-        # Limpiamos saltos de línea extra
-        actividad_limpia = item.get("actividad", "").replace("\n\n", "\n")
-        row[1].text = actividad_limpia
-        
-        # Columna 3: Imágenes
-        celda_img = row[2]
-        parrafo = celda_img.paragraphs[0]
-        
+        parrafo_img = row[2].paragraphs[0]
         if not item["fotos"]:
-            parrafo.add_run("[Sin imágenes]")
-        else:
-            for img_blob in item["fotos"]:
-                try:
-                    run = parrafo.add_run()
-                    run.add_picture(io.BytesIO(img_blob), width=Inches(2.2))
-                    parrafo.add_run("\n") # Salto de línea entre foto y foto
-                except:
-                    pass
-                    
+            parrafo_img.add_run("[Sin fotos]")
+        
+        for img_bytes in item["fotos"]:
+            try:
+                run = parrafo_img.add_run()
+                run.add_picture(io.BytesIO(img_bytes), width=Inches(2.1))
+                parrafo_img.add_run("\n")
+            except:
+                pass
+                
     buffer = io.BytesIO()
-    doc_final.save(buffer)
+    doc.save(buffer)
     buffer.seek(0)
     return buffer
 
-# --- INTERFAZ STREAMLIT ---
-st.title("Generador de Tabla Resumen MAP (V3 - Extracción Profunda)")
+# --- INTERFAZ ---
+st.title("Generador MAP V4 (Escáner Profundo)")
+st.info("Esta versión busca en toda la fila y usa namespaces XML para las fotos.")
 
-st.warning("⚠️ Asegúrate de que tu requirements.txt tenga: python-docx, streamlit, lxml")
+archivos = st.file_uploader("Sube Anexos", accept_multiple_files=True)
+debug = st.checkbox("Mostrar registro de proceso (Logs)")
 
-debug_mode = st.checkbox("Ver detalles del proceso (Diagnóstico)")
-archivos = st.file_uploader("Sube los anexos (.docx)", accept_multiple_files=True)
-
-if archivos and st.button("Generar Tabla"):
-    todos_los_datos = []
+if archivos and st.button("Generar"):
+    total_fichas = []
     
-    barra = st.progress(0)
-    for i, archivo in enumerate(archivos):
-        # Procesar
-        datos = procesar_documento(archivo.read(), archivo.name)
-        todos_los_datos.extend(datos)
+    for arch in archivos:
+        bytes_archivo = arch.read()
+        fichas, logs = escanear_documento(bytes_archivo, arch.name)
+        total_fichas.extend(fichas)
         
-        # Diagnóstico en pantalla
-        if debug_mode:
-            st.write(f"📄 **{archivo.name}**: Se encontraron {len(datos)} fichas.")
-            for d in datos:
-                st.write(f"- Fecha: {d['fecha']} | Fotos encontradas: {len(d['fotos'])}")
-        
-        barra.progress((i + 1) / len(archivos))
-        
-    if todos_los_datos:
+        if debug:
+            st.write(f"**Procesando {arch.name}:**")
+            for l in logs:
+                st.text(l)
+                
+    if total_fichas:
         # Ordenar cronológicamente
-        todos_los_datos.sort(key=lambda x: x['fecha'] if x['fecha'] else "")
+        total_fichas.sort(key=lambda x: x['fecha'] if x['fecha'] else "")
         
-        doc_binario = generar_word_salida(todos_los_datos)
-        
-        st.success(f"¡Listo! Se generó una tabla con {len(todos_los_datos)} filas.")
-        st.download_button(
-            "⬇️ Descargar Tabla Resumen.docx",
-            data=doc_binario,
-            file_name="Tabla_Resumen_Final.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
+        word_bytes = generar_word_final(total_fichas)
+        st.success(f"¡Éxito! Se generaron {len(total_fichas)} filas.")
+        st.download_button("Descargar Tabla Resumen.docx", word_bytes, "Resumen_MAP.docx")
     else:
-        st.error("No se pudo extraer información. Revisa el formato de los anexos.")
+        st.error("No se encontró ninguna ficha válida (con Fecha). Revisa los logs.")

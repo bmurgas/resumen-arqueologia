@@ -4,27 +4,40 @@ from docx.shared import Inches, Pt
 from docx.oxml.ns import qn
 import io
 
-st.set_page_config(page_title="Generador MAP V8 (Leyendas + Hallazgos X)", layout="wide")
+st.set_page_config(page_title="Generador MAP V9 (Final)", layout="wide")
 
-def obtener_imagenes_xml(celda, doc_relacionado):
+def obtener_imagenes_de_elemento(elemento_xml, doc_relacionado):
     """
-    Extrae las imágenes binarias de una celda.
+    Busca imágenes recursivamente dentro de cualquier elemento XML (celda o párrafo).
     """
     imagenes = []
-    try:
-        # Buscamos etiquetas de imagen (a:blip)
-        blips = celda._element.xpath('.//a:blip')
-        for blip in blips:
+    # Buscamos etiquetas 'a:blip' que son las imágenes en Word
+    blips = elemento_xml.xpath('.//a:blip')
+    for blip in blips:
+        try:
             embed_code = blip.get(qn('r:embed'))
             if embed_code:
                 part = doc_relacionado.part.related_parts[embed_code]
                 if 'image' in part.content_type:
                     imagenes.append(part.blob)
-    except:
-        pass
+        except:
+            continue
     return imagenes
 
-def procesar_archivo_v8(archivo_bytes, nombre_archivo):
+def obtener_texto_celda_abajo(tabla, fila_idx, col_idx):
+    """Intenta obtener el texto de la celda justo debajo (fila+1, misma columna)."""
+    try:
+        # Verificamos si existe la fila siguiente
+        if fila_idx + 1 < len(tabla.rows):
+            fila_siguiente = tabla.rows[fila_idx + 1]
+            # Verificamos si existe la columna (cuidado con celdas combinadas)
+            if col_idx < len(fila_siguiente.cells):
+                return fila_siguiente.cells[col_idx].text.strip()
+    except:
+        pass
+    return ""
+
+def procesar_archivo_v9(archivo_bytes, nombre_archivo):
     try:
         doc = Document(io.BytesIO(archivo_bytes))
     except Exception as e:
@@ -33,38 +46,36 @@ def procesar_archivo_v8(archivo_bytes, nombre_archivo):
 
     fichas_extraidas = []
     
-    # MEMORIA PERSISTENTE PARA FECHA
-    fecha_actual_persistente = "Sin Fecha Inicial"
+    # MEMORIA PERSISTENTE (Para heredar fecha si la ficha no la tiene)
+    fecha_persistente = "Sin Fecha"
 
-    # Recorremos TABLA POR TABLA
-    for tabla_idx, tabla in enumerate(doc.tables):
+    # Recorremos todas las tablas (fichas)
+    for tabla in doc.tables:
         
         datos_ficha = {
             "fecha_propia": None,
             "actividad": "",
-            "hallazgos": "", # Se llenará según la X
-            "fotos_con_leyenda": [] # Lista de diccionarios {img, leyenda}
+            "hallazgos": "", 
+            "items_foto": [] # Lista de diccionarios: {'blob': img, 'leyenda': txt}
         }
         
-        # Estructuras para mapear fotos y textos por coordenadas (Fila, Columna)
-        mapa_fotos = {} # Key: (r, c), Value: [blob, blob...]
-        mapa_textos = {} # Key: (r, c), Value: "Texto"
-        seccion_fotos_inicio = -1 # Fila donde empiezan las fotos
+        en_seccion_fotos = False
         
-        # --- PASO 1: ESCANEO DE LA TABLA ---
+        # Analizamos fila por fila
         for r_idx, fila in enumerate(tabla.rows):
             texto_fila = " ".join([c.text.strip() for c in fila.cells]).strip()
             
-            # A) FECHA
+            # --- 1. FECHA (Heredable) ---
             if "Fecha" in texto_fila:
                 for celda in fila.cells:
-                    txt = celda.text.strip()
-                    if "Fecha" not in txt and len(txt) > 6:
-                        datos_ficha["fecha_propia"] = txt
-                        fecha_actual_persistente = txt
+                    t = celda.text.strip()
+                    # Si parece una fecha (no es el título 'Fecha' y es larga)
+                    if "Fecha" not in t and len(t) > 5:
+                        datos_ficha["fecha_propia"] = t
+                        fecha_persistente = t # Actualizamos la memoria
                         break
             
-            # B) ACTIVIDAD
+            # --- 2. ACTIVIDAD ---
             if "Descripción de la actividad" in texto_fila:
                 mejor_texto = ""
                 for celda in fila.cells:
@@ -75,82 +86,71 @@ def procesar_archivo_v8(archivo_bytes, nombre_archivo):
                 if mejor_texto:
                     datos_ficha["actividad"] = mejor_texto
 
-            # C) HALLAZGOS (Lógica de la "X")
-            # Buscamos si la fila corresponde a Ausencia o Presencia
+            # --- 3. HALLAZGOS (Lógica estricta de la "X") ---
             if "Ausencia" in texto_fila:
-                # Revisamos TODAS las celdas de esta fila buscando una "X"
-                for celda in fila.cells:
-                    if celda.text.strip().upper() == "X":
-                        datos_ficha["hallazgos"] = "Ausencia de hallazgos arqueológicos no previstos."
+                # Revisamos si alguna celda de esta fila tiene una "X"
+                tiene_x = any(c.text.strip().upper() == "X" for c in fila.cells)
+                if tiene_x:
+                    datos_ficha["hallazgos"] = "Ausencia de hallazgos arqueológicos no previstos."
             
             if "Presencia" in texto_fila:
-                for celda in fila.cells:
-                    if celda.text.strip().upper() == "X":
-                        datos_ficha["hallazgos"] = "PRESENCIA de hallazgos arqueológicos."
+                tiene_x = any(c.text.strip().upper() == "X" for c in fila.cells)
+                if tiene_x:
+                    datos_ficha["hallazgos"] = "PRESENCIA de hallazgos arqueológicos."
 
-            # D) REGISTRO FOTOGRÁFICO (Mapeo)
+            # --- 4. FOTOS Y LEYENDAS ---
+            # Detectamos inicio de sección
             if "Registro fotográfico" in texto_fila:
-                seccion_fotos_inicio = r_idx
-                continue
-            
-            if seccion_fotos_inicio != -1 and r_idx > seccion_fotos_inicio:
-                # Estamos en la zona de fotos. Guardamos todo lo que vemos.
+                en_seccion_fotos = True
+                continue # Saltamos la fila del título
+
+            if en_seccion_fotos:
+                # Recorremos CADA CELDA de la fila buscando fotos
                 for c_idx, celda in enumerate(fila.cells):
-                    # 1. Guardar Texto
-                    texto_celda = celda.text.strip()
-                    if texto_celda:
-                        mapa_textos[(r_idx, c_idx)] = texto_celda
+                    # Usamos la función de extracción robusta (V7) pero por celda
+                    imgs = obtener_imagenes_de_elemento(celda._element, doc)
                     
-                    # 2. Guardar Fotos
-                    imgs = obtener_imagenes_xml(celda._element, doc)
                     if imgs:
-                        mapa_fotos[(r_idx, c_idx)] = imgs
+                        # ¡Encontramos fotos! Ahora buscamos su leyenda.
+                        
+                        # Opción A: Texto en la misma celda
+                        texto_leyenda = celda.text.strip()
+                        
+                        # Opción B: Si la celda está vacía, miramos la celda DE ABAJO
+                        if not texto_leyenda:
+                            texto_leyenda = obtener_texto_celda_abajo(tabla, r_idx, c_idx)
+                        
+                        # Guardamos cada foto encontrada con esa leyenda
+                        for img in imgs:
+                            datos_ficha["items_foto"].append({
+                                "blob": img,
+                                "leyenda": texto_leyenda
+                            })
 
-        # --- PASO 2: ASOCIAR FOTOS CON LEYENDAS ---
-        # Recorremos las fotos encontradas y buscamos su leyenda
-        # Prioridad: 1. Texto en la misma celda. 2. Texto en la celda de ABRAJO.
-        for (r, c), lista_imgs in mapa_fotos.items():
-            leyenda_encontrada = ""
-            
-            # Intento 1: Misma celda
-            if (r, c) in mapa_textos:
-                leyenda_encontrada = mapa_textos[(r, c)]
-            
-            # Intento 2: Celda de abajo (r+1), misma columna
-            # Muchos formatos ponen la foto arriba y el texto abajo
-            if not leyenda_encontrada:
-                if (r + 1, c) in mapa_textos:
-                    leyenda_encontrada = mapa_textos[(r + 1, c)]
-            
-            # Guardamos cada foto con su leyenda
-            for img_blob in lista_imgs:
-                datos_ficha["fotos_con_leyenda"].append({
-                    "blob": img_blob,
-                    "leyenda": leyenda_encontrada
-                })
-
-        # --- PASO 3: CONSOLIDAR ---
-        fecha_final = datos_ficha["fecha_propia"] if datos_ficha["fecha_propia"] else fecha_actual_persistente
+        # --- FIN DE LA TABLA ---
+        # Determinamos fecha final (Propia o Heredada)
+        fecha_final = datos_ficha["fecha_propia"] if datos_ficha["fecha_propia"] else fecha_persistente
         
-        # Si no se detectó ninguna X, ponemos un default seguro (opcional) o lo dejamos vacío
-        # Si quieres forzar Ausencia si no hay X, descomenta la siguiente línea:
-        # if not datos_ficha["hallazgos"]: datos_ficha["hallazgos"] = "Ausencia (No marcado)"
+        # Validamos Hallazgos (Si no se marcó nada, lo dejamos vacío o ponemos default si prefieres)
+        # if not datos_ficha["hallazgos"]: datos_ficha["hallazgos"] = "Ausencia (No verificado)"
 
-        if datos_ficha["actividad"] or datos_ficha["fotos_con_leyenda"]:
+        # Solo guardamos si hay contenido relevante
+        if datos_ficha["actividad"] or datos_ficha["items_foto"]:
             
-            texto_col_central = datos_ficha["actividad"]
+            # Construimos el texto central combinado
+            texto_central = datos_ficha["actividad"]
             if datos_ficha["hallazgos"]:
-                texto_col_central += f"\n\n[Hallazgos: {datos_ficha['hallazgos']}]"
+                texto_central += f"\n\n[Hallazgos: {datos_ficha['hallazgos']}]"
             
             fichas_extraidas.append({
                 "fecha": fecha_final,
-                "texto_central": texto_col_central,
-                "fotos": datos_ficha["fotos_con_leyenda"]
+                "texto_central": texto_central,
+                "fotos": datos_ficha["items_foto"]
             })
 
     return fichas_extraidas
 
-def generar_word_v8(datos):
+def generar_word_v9(datos):
     doc = Document()
     doc.add_heading('Tabla Resumen Monitoreo Arqueológico', 0)
     
@@ -163,6 +163,7 @@ def generar_word_v8(datos):
     headers[1].text = "Actividades realizadas durante el MAP"
     headers[2].text = "Imagen de la actividad"
     
+    # Anchos de columna
     for c in tabla.columns[0].cells: c.width = Inches(0.9)
     for c in tabla.columns[1].cells: c.width = Inches(3.5)
     for c in tabla.columns[2].cells: c.width = Inches(2.5)
@@ -172,6 +173,7 @@ def generar_word_v8(datos):
         row[0].text = str(item["fecha"])
         row[1].text = str(item["texto_central"])
         
+        # Columna de Fotos
         celda_img = row[2]
         parrafo = celda_img.paragraphs[0]
         
@@ -180,22 +182,21 @@ def generar_word_v8(datos):
         else:
             for i, foto_obj in enumerate(item["fotos"]):
                 try:
+                    # Insertamos imagen
                     run = parrafo.add_run()
                     run.add_picture(io.BytesIO(foto_obj["blob"]), width=Inches(2.0))
                     
-                    # Agregar la leyenda debajo de la foto
+                    # Insertamos leyenda
                     if foto_obj["leyenda"]:
-                        p_leyenda = parrafo.add_run(f"\n{foto_obj['leyenda']}\n")
-                        p_leyenda.font.size = Pt(9) # Letra un poco más pequeña para la leyenda
-                        p_leyenda.italic = True
-                    else:
-                        parrafo.add_run("\n")
-                        
-                    # Espacio extra entre fotos si hay más de una
+                        run_text = parrafo.add_run(f"\n{foto_obj['leyenda']}")
+                        run_text.font.size = Pt(9)
+                        run_text.italic = True
+                    
+                    # Espacio entre fotos
                     if i < len(item["fotos"]) - 1:
-                        parrafo.add_run("\n")
+                        parrafo.add_run("\n\n")
                 except:
-                    pass
+                    continue
     
     buffer = io.BytesIO()
     doc.save(buffer)
@@ -203,29 +204,30 @@ def generar_word_v8(datos):
     return buffer
 
 # --- INTERFAZ ---
-st.title("Generador MAP V8 (Leyendas + Hallazgos por 'X')")
-st.info("Ahora busca la 'X' para definir Hallazgos y busca el texto debajo de la foto.")
+st.title("Generador MAP V9 (Final)")
+st.info("Incluye: Hallazgos por X, Fotos robustas y Leyendas automáticas (misma celda o abajo).")
 
-archivos = st.file_uploader("Sube Anexos", accept_multiple_files=True)
-debug = st.checkbox("Debug")
+archivos = st.file_uploader("Sube Anexos (.docx)", accept_multiple_files=True)
+debug = st.checkbox("Ver Logs")
 
 if archivos and st.button("Generar Tabla"):
     todas = []
     bar = st.progress(0)
+    
     for i, a in enumerate(archivos):
-        fichas = procesar_archivo_v8(a.read(), a.name)
+        fichas = procesar_archivo_v9(a.read(), a.name)
         todas.extend(fichas)
         bar.progress((i+1)/len(archivos))
         
         if debug:
-            st.write(f"**{a.name}**: {len(fichas)} fichas.")
+            st.write(f"📄 {a.name}: {len(fichas)} fichas.")
             for f in fichas:
-                st.write(f"- {f['fecha']} | Hallazgo: {f['texto_central'][-20:]} | Fotos: {len(f['fotos'])}")
+                st.write(f"   📅 {f['fecha']} | Fotos: {len(f['fotos'])}")
 
     if todas:
         todas.sort(key=lambda x: x['fecha'] if x['fecha'] else "ZZZ")
-        doc_out = generar_word_v8(todas)
-        st.success("Tabla generada con éxito.")
-        st.download_button("Descargar Tabla Resumen.docx", doc_out, "Resumen_MAP_V8.docx")
+        doc_out = generar_word_v9(todas)
+        st.success(f"¡Listo! Se generó la tabla con {len(todas)} registros.")
+        st.download_button("Descargar Tabla Resumen.docx", doc_out, "Resumen_MAP_Final.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
     else:
         st.error("No se encontraron datos.")

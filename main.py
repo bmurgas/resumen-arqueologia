@@ -79,9 +79,9 @@ def procesar_archivo_v12(archivo_bytes, nombre_archivo):
 
             # 3. HALLAZGOS
             if "Ausencia" in texto_fila and any(c.text.strip().upper() == "X" for c in fila.cells):
-                datos_ficha["hallazgos"] = "Ausencia de hallazgos arqueológicos no previstos."
+                datos_ficha["hallazgos"] = "-Durante la jornada no se registran hallazgos arqueológicos protegidos por la Ley 17.288 Sobre Monumentos Nacionales."
             if "Presencia" in texto_fila and any(c.text.strip().upper() == "X" for c in fila.cells):
-                datos_ficha["hallazgos"] = "PRESENCIA de hallazgos arqueológicos."
+                datos_ficha["hallazgos"] = "Se identifican hallazgos arqueológicos."
 
             # 4. FOTOS
             if "Registro fotográfico" in texto_fila:

@@ -1,14 +1,18 @@
 import streamlit as st
 from docx import Document
-from docx.shared import Inches, Pt, Cm # Importamos Cm para medidas exactas
+from docx.shared import Inches, Pt, Cm
 from docx.oxml.ns import qn
-from docx.enum.text import WD_ALIGN_PARAGRAPH # Para centrar texto/fotos
-from docx.enum.table import WD_TABLE_ALIGNMENT # Para centrar la tabla
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
 import io
 
-st.set_page_config(page_title="Generador MAP V12 (Formato Franklin)", layout="wide")
+# --- 1. CONFIGURACIÓN GLOBAL ---
+st.set_page_config(page_title="Arqueología - Suite de Herramientas", layout="wide")
 
-# --- BLOQUE DE EXTRACCIÓN (LÓGICA V10 INTACTA) ---
+# ==========================================
+#      BLOQUE DE LÓGICA (GENERADOR WORD)
+# ==========================================
+
 def obtener_imagenes_con_id(elemento_xml, doc_relacionado):
     resultados = [] 
     blips = elemento_xml.xpath('.//a:blip')
@@ -34,6 +38,7 @@ def obtener_texto_celda_abajo(tabla, fila_idx, col_idx):
     return ""
 
 def procesar_archivo_v12(archivo_bytes, nombre_archivo):
+    # Lógica de extracción V12 (Intacta)
     try:
         doc = Document(io.BytesIO(archivo_bytes))
     except Exception as e:
@@ -54,7 +59,7 @@ def procesar_archivo_v12(archivo_bytes, nombre_archivo):
         for r_idx, fila in enumerate(tabla.rows):
             texto_fila = " ".join([c.text.strip() for c in fila.cells]).strip()
             
-            # 1. FECHA
+            # FECHA
             if "Fecha" in texto_fila:
                 for celda in fila.cells:
                     t = celda.text.strip()
@@ -63,7 +68,7 @@ def procesar_archivo_v12(archivo_bytes, nombre_archivo):
                         fecha_persistente = t
                         break
             
-            # 2. ACTIVIDAD
+            # ACTIVIDAD
             if "Descripción de la actividad" in texto_fila:
                 mejor_texto = ""
                 celdas_fila_vistas = set()
@@ -77,13 +82,13 @@ def procesar_archivo_v12(archivo_bytes, nombre_archivo):
                 if mejor_texto:
                     datos_ficha["actividad"] = mejor_texto
 
-            # 3. HALLAZGOS
+            # HALLAZGOS
             if "Ausencia" in texto_fila and any(c.text.strip().upper() == "X" for c in fila.cells):
-                datos_ficha["hallazgos"] = "-Durante la jornada no se registran hallazgos arqueológicos protegidos por la Ley 17.288 Sobre Monumentos Nacionales."
+                datos_ficha["hallazgos"] = "Ausencia de hallazgos arqueológicos no previstos."
             if "Presencia" in texto_fila and any(c.text.strip().upper() == "X" for c in fila.cells):
-                datos_ficha["hallazgos"] = "Se identifican hallazgos arqueológicos."
+                datos_ficha["hallazgos"] = "PRESENCIA de hallazgos arqueológicos."
 
-            # 4. FOTOS
+            # FOTOS
             if "Registro fotográfico" in texto_fila:
                 en_seccion_fotos = True
                 continue 
@@ -120,61 +125,52 @@ def procesar_archivo_v12(archivo_bytes, nombre_archivo):
 
     return fichas_extraidas
 
-# --- BLOQUE DE GENERACIÓN WORD (FORMATO APLICADO AQUÍ) ---
 def generar_word_con_formato(datos):
+    # Lógica de generación V12 (Intacta con estilos Franklin)
     doc = Document()
-    
-    # Título (Opcional, mantenemos estándar)
     titulo = doc.add_heading('Tabla Resumen Monitoreo Arqueológico', 0)
     titulo.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
-    # 1. ALINEAR TABLA AL CENTRO
     tabla = doc.add_table(rows=1, cols=3)
     tabla.style = 'Table Grid'
     tabla.autofit = False
     tabla.alignment = WD_TABLE_ALIGNMENT.CENTER 
 
-    # --- Configuración de Encabezados ---
     headers = tabla.rows[0].cells
     titulos = ["Fecha", "Actividades realizadas durante el MAP", "Imagen de la actividad"]
     
     for i, texto in enumerate(titulos):
         parrafo = headers[i].paragraphs[0]
         run = parrafo.add_run(texto)
-        # 2. FUENTE FRANKLIN GOTHIC BOOK 9
         run.font.name = 'Franklin Gothic Book'
         run.font.size = Pt(9)
         run.bold = True
         parrafo.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    # Ajuste de anchos (Necesitamos al menos 8cm en la col 3 para la foto)
-    # 8 cm es aprox 3.15 pulgadas.
-    for c in tabla.columns[0].cells: c.width = Cm(2.5) # Fecha
-    for c in tabla.columns[1].cells: c.width = Cm(7.5) # Actividad
-    for c in tabla.columns[2].cells: c.width = Cm(8.5) # Fotos (Un poco más que 8cm)
+    for c in tabla.columns[0].cells: c.width = Cm(2.5) 
+    for c in tabla.columns[1].cells: c.width = Cm(7.5) 
+    for c in tabla.columns[2].cells: c.width = Cm(8.5) 
 
-    # --- Llenado de Filas ---
     for item in datos:
         row = tabla.add_row().cells
         
-        # COLUMNA 1: FECHA
+        # FECHA
         p_fecha = row[0].paragraphs[0]
         p_fecha.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r_fecha = p_fecha.add_run(str(item["fecha"]))
         r_fecha.font.name = 'Franklin Gothic Book'
         r_fecha.font.size = Pt(9)
 
-        # COLUMNA 2: TEXTO
+        # TEXTO
         p_act = row[1].paragraphs[0]
-        p_act.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY # Justificado se ve mejor
+        p_act.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         r_act = p_act.add_run(str(item["texto_central"]))
         r_act.font.name = 'Franklin Gothic Book'
         r_act.font.size = Pt(9)
         
-        # COLUMNA 3: FOTOS
+        # FOTOS
         celda_img = row[2]
         p_img = celda_img.paragraphs[0]
-        # 4. FOTO ALINEADA AL CENTRO DE SU COLUMNA
         p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER 
         
         if not item["fotos"]:
@@ -185,9 +181,6 @@ def generar_word_con_formato(datos):
             for i, foto_obj in enumerate(item["fotos"]):
                 try:
                     run = p_img.add_run()
-                    # 3. TAMAÑO DE FOTO 6 CM ALTO x 8 CM ANCHO
-                    # Nota: Forzar ambas medidas puede deformar la imagen si no es 4:3.
-                    # Si prefieres mantener proporción, usa solo width. Aquí obedezco tu orden.
                     run.add_picture(io.BytesIO(foto_obj["blob"]), width=Cm(8), height=Cm(6))
                     
                     if foto_obj["leyenda"]:
@@ -206,26 +199,66 @@ def generar_word_con_formato(datos):
     buffer.seek(0)
     return buffer
 
-# --- INTERFAZ ---
-st.title("Generador MAP V12 (Estilo Franklin)")
-st.info("Formato: Tabla Centrada, Fuente Franklin Gothic Book 9, Fotos 8x6 cm centradas.")
+# ==========================================
+#          PÁGINAS DE LA APLICACIÓN
+# ==========================================
 
-archivos = st.file_uploader("Sube Anexos (.docx)", accept_multiple_files=True)
-debug = st.checkbox("Ver Logs")
+def mostrar_pagina_word():
+    st.title("Generador MAP (Informe Word)")
+    st.markdown("### Convierte Anexos Diarios en Tabla Resumen")
+    st.info("Formato: Franklin Gothic Book 9 | Fotos 8x6 cm | Centrado")
 
-if archivos and st.button("Generar Tabla"):
-    todas = []
-    bar = st.progress(0)
+    archivos = st.file_uploader("Cargar Anexos (.docx)", accept_multiple_files=True, key="upload_word")
+    debug = st.checkbox("Ver detalles técnicos", key="debug_word")
+
+    if archivos and st.button("Generar Informe", key="btn_word"):
+        todas = []
+        bar = st.progress(0)
+        
+        for i, a in enumerate(archivos):
+            fichas = procesar_archivo_v12(a.read(), a.name)
+            todas.extend(fichas)
+            bar.progress((i+1)/len(archivos))
+            
+            if debug:
+                st.write(f"📄 {a.name}: {len(fichas)} fichas detectadas.")
+
+        if todas:
+            todas.sort(key=lambda x: x['fecha'] if x['fecha'] else "ZZZ")
+            doc_out = generar_word_con_formato(todas)
+            st.success("✅ Informe generado exitosamente.")
+            st.download_button("⬇️ Descargar Word", doc_out, "Resumen_MAP_V12.docx")
+        else:
+            st.error("⚠️ No se encontraron datos válidos.")
+
+def mostrar_pagina_pdf():
+    st.title("Extractor de Datos (PDF a Excel)")
+    st.markdown("---")
+    st.warning("🚧 **En construcción**")
+    st.write("Aquí implementaremos la función para transformar informes PDF antiguos o escaneados directamente a planillas Excel.")
     
-    for i, a in enumerate(archivos):
-        fichas = procesar_archivo_v12(a.read(), a.name)
-        todas.extend(fichas)
-        bar.progress((i+1)/len(archivos))
+    # Placeholder visual para que veas cómo quedaría
+    st.file_uploader("Cargar PDF (Demostración)", type="pdf", disabled=True)
+    st.button("Convertir a Excel", disabled=True)
 
-    if todas:
-        todas.sort(key=lambda x: x['fecha'] if x['fecha'] else "ZZZ")
-        doc_out = generar_word_con_formato(todas)
-        st.success("Tabla generada con el formato solicitado.")
-        st.download_button("Descargar Tabla Resumen.docx", doc_out, "Resumen_MAP_Estilo.docx")
-    else:
-        st.error("No se encontraron datos.")
+# ==========================================
+#        MENÚ DE NAVEGACIÓN PRINCIPAL
+# ==========================================
+
+# Menú lateral
+st.sidebar.image("https://cdn-icons-png.flaticon.com/512/1087/1087840.png", width=100) # Icono genérico (opcional)
+st.sidebar.title("Menú Principal")
+
+opcion_seleccionada = st.sidebar.radio(
+    "Selecciona una herramienta:",
+    ["📄 Generador Word MAP", "📊 Extractor PDF (Próx.)"]
+)
+
+st.sidebar.markdown("---")
+st.sidebar.info("Versión 13.0 - Multi-Herramienta")
+
+# Lógica de visualización
+if opcion_seleccionada == "📄 Generador Word MAP":
+    mostrar_pagina_word()
+elif opcion_seleccionada == "📊 Extractor PDF (Próx.)":
+    mostrar_pagina_pdf()

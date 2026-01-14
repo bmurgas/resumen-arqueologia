@@ -13,7 +13,7 @@ import re
 st.set_page_config(page_title="Arqueología - Suite de Herramientas", layout="wide")
 
 # ==========================================
-#      LÓGICA GENERADOR WORD (INTACTA DEL TXT)
+#      LÓGICA GENERADOR WORD (INTACTA)
 # ==========================================
 
 def obtener_imagenes_con_id(elemento_xml, doc_relacionado):
@@ -195,105 +195,68 @@ def generar_word_con_formato(datos):
     return buffer
 
 # ==========================================
-#      LÓGICA EXTRACTOR PDF (MODIFICADA)
+#      LÓGICA EXTRACTOR PDF (CORREGIDA V17)
 # ==========================================
 
 def extraer_datos_pdf(archivo_bytes):
     """
-    Lee un PDF y busca datos. 
-    MODIFICACIÓN: Intenta leer como TABLA primero para encontrar "la celda de al lado".
+    Lee un PDF y busca datos en las tablas, escaneando celda por celda.
+    Corrección: Busca la palabra clave en CUALQUIER celda y toma la SIGUIENTE.
     """
     datos_extraidos = []
     
     with pdfplumber.open(io.BytesIO(archivo_bytes)) as pdf:
         for pagina in pdf.pages:
             info = {}
-            encontrado_en_tabla = False
             
-            # --- ESTRATEGIA 1: BUSCAR EN TABLAS (Celda de al lado) ---
-            # Esto soluciona lo de "Categoría (SA/HA):" y "Descripción"
+            # --- ESTRATEGIA: ESCÁNER DE TABLAS ---
             tablas = pagina.extract_tables()
             
             for tabla in tablas:
-                # Recorremos cada fila de la tabla detectada
                 for fila in tabla:
-                    # Limpiamos nulos
-                    fila_limpia = [str(c).strip() if c else "" for c in fila]
+                    # Normalizamos la fila (None -> "")
+                    fila_segura = [str(c).strip() if c else "" for c in fila]
                     
-                    # Necesitamos al menos 2 celdas para tener "Etiqueta" y "Valor"
-                    if len(fila_limpia) < 2: continue
-                    
-                    etiqueta = fila_limpia[0] # Celda Izquierda
-                    valor = fila_limpia[1]    # Celda Derecha (Celda de al lado)
-                    
-                    # 1. CATEGORÍA
-                    if "Categoría" in etiqueta: 
-                        info["Categoría"] = valor
-                        encontrado_en_tabla = True
+                    # Recorremos cada celda buscando las etiquetas
+                    for i, celda in enumerate(fila_segura):
+                        
+                        # 1. CATEGORÍA
+                        # Busca "Categoría" y verifica si hay una celda a la derecha
+                        if "Categoría" in celda and "SA/HA" in celda:
+                            if i + 1 < len(fila_segura):
+                                info["Categoría"] = fila_segura[i+1]
 
-                    # 2. DESCRIPCIÓN (Evitando "Descripción de la actividad" si es distinta)
-                    # Si dice solo "Descripción" o "Descripción del hallazgo"
-                    if "Descripción" in etiqueta and "actividad" not in etiqueta.lower():
-                        info["Descripción"] = valor
-                        encontrado_en_tabla = True
+                        # 2. DESCRIPCIÓN
+                        # Busca "Descripción" a secas (para no confundir con act. realizada)
+                        if celda == "Descripción" or ("Descripción" in celda and "actividad" not in celda.lower()):
+                            if i + 1 < len(fila_segura):
+                                info["Descripción"] = fila_segura[i+1]
 
-                    # 3. ID SITIO
-                    if "ID Sitio" in etiqueta or "Código" in etiqueta:
-                        info["ID Sitio"] = valor
-                        encontrado_en_tabla = True
-                    
-                    # 4. FECHA
-                    if "Fecha" in etiqueta:
-                        info["Fecha"] = valor
-                        encontrado_en_tabla = True
+                        # 3. ID SITIO
+                        if "ID Sitio" in celda:
+                            if i + 1 < len(fila_segura):
+                                info["ID Sitio"] = fila_segura[i+1]
 
-                    # 5. RESPONSABLE
-                    if "Responsable" in etiqueta:
-                        info["Responsable"] = valor
-                        encontrado_en_tabla = True
-            
-            # --- ESTRATEGIA 2: TEXTO PLANO (RESPALDO DEL TXT ORIGINAL) ---
-            # Si no encontró nada en tablas, o para complementar, usamos Regex
-            texto = pagina.extract_text()
-            if texto:
-                # ID (Si no lo tenemos)
-                if "ID Sitio" not in info:
-                    match_id = re.search(r"ID Sitio:?\s*([A-Za-z0-9\-]+)", texto, re.IGNORECASE)
-                    if not match_id: match_id = re.search(r"(HA-\d+|SA-\d+)", texto)
-                    info["ID Sitio"] = match_id.group(1) if match_id else "No encontrado"
-                
-                # Fecha
-                if "Fecha" not in info:
-                    match_fecha = re.search(r"(\d{2}[-/]\d{2}[-/]\d{4})", texto)
-                    info["Fecha"] = match_fecha.group(1) if match_fecha else "No encontrada"
+                        # 4. FECHA
+                        if "Fecha" in celda:
+                            if i + 1 < len(fila_segura):
+                                info["Fecha"] = fila_segura[i+1]
 
-                # Coordenadas (Estas suelen estar en texto suelto)
-                match_norte = re.search(r"Norte:?\s*.*?(\d{6,8})", texto, re.IGNORECASE | re.DOTALL)
-                info["Coord. Norte"] = match_norte.group(1) if match_norte else ""
+                        # 5. RESPONSABLE
+                        if "Responsable" in celda:
+                            if i + 1 < len(fila_segura):
+                                info["Responsable"] = fila_segura[i+1]
+                        
+                        # 6. COORDENADAS (Opcional, si están en formato tabla)
+                        if "Coord. Central Norte" in celda:
+                            if i + 1 < len(fila_segura):
+                                info["Coord. Norte"] = fila_segura[i+1]
+                        if "Coord. Central Este" in celda:
+                            if i + 1 < len(fila_segura):
+                                info["Coord. Este"] = fila_segura[i+1]
 
-                match_este = re.search(r"Este:?\s*.*?(\d{5,7})", texto, re.IGNORECASE | re.DOTALL)
-                info["Coord. Este"] = match_este.group(1) if match_este else ""
-
-                # Categoría (Respaldo Regex)
-                if "Categoría" not in info:
-                    match_cat = re.search(r"Categoría.*?(SA|HA)", texto, re.IGNORECASE | re.DOTALL)
-                    if match_cat: info["Categoría"] = match_cat.group(1)
-                    else:
-                        if "HA" in texto and "SA" not in texto: info["Categoría"] = "HA"
-                        elif "SA" in texto and "HA" not in texto: info["Categoría"] = "SA"
-
-                # Descripción (Respaldo Regex)
-                if "Descripción" not in info:
-                    match_desc = re.search(r"Descripción.*?\n(.*?)(?:\n\n|Evidencias|Cronología|$)", texto, re.IGNORECASE | re.DOTALL)
-                    if match_desc: info["Descripción"] = match_desc.group(1).strip()
-
-                # Responsable (Respaldo Regex)
-                if "Responsable" not in info:
-                    match_resp = re.search(r"Responsable:?\s*(.*?)(?:\n|$)", texto, re.IGNORECASE)
-                    if match_resp: info["Responsable"] = match_resp.group(1).replace("\n", " ").strip()
-
-            # Guardamos si hay algo útil
-            if info.get("ID Sitio") != "No encontrado" or info.get("Fecha") != "No encontrada":
+            # Si encontramos datos válidos en esta página, la guardamos
+            if info.get("ID Sitio") or info.get("Fecha"):
                 datos_extraidos.append(info)
                 
     return datos_extraidos
@@ -327,22 +290,22 @@ def mostrar_pagina_word():
 
 def mostrar_pagina_pdf():
     st.title("Extractor de Fichas PDF a Excel")
-    st.markdown("Extrae ID, Coordenadas, Categoría, Descripción y Responsables de las fichas PDF.")
+    st.markdown("Extrae datos de fichas de hallazgo (Tablas PDF).")
     
     archivo_pdf = st.file_uploader("Subir PDF de Hallazgos (.pdf)", type="pdf", key="pdf_up")
     
     if archivo_pdf and st.button("Procesar PDF y Crear Excel"):
-        with st.spinner("Leyendo PDF... esto puede tomar unos segundos."):
+        with st.spinner("Escaneando tablas del PDF..."):
             datos = extraer_datos_pdf(archivo_pdf.read())
             
             if datos:
                 df = pd.DataFrame(datos)
-                # Orden de columnas para el Excel
-                columnas_orden = ["ID Sitio", "Fecha", "Categoría", "Coord. Norte", "Coord. Este", "Responsable", "Descripción"]
-                cols_existentes = [c for c in columnas_orden if c in df.columns]
-                df = df[cols_existentes]
+                # Ordenar columnas lógicamente
+                cols_deseadas = ["ID Sitio", "Fecha", "Categoría", "Descripción", "Responsable", "Coord. Norte", "Coord. Este"]
+                cols_finales = [c for c in cols_deseadas if c in df.columns]
+                df = df[cols_finales]
                 
-                st.success(f"✅ Se extrajeron {len(df)} registros.")
+                st.success(f"✅ Se extrajeron {len(df)} fichas.")
                 st.dataframe(df) 
                 
                 buffer = io.BytesIO()
@@ -356,7 +319,7 @@ def mostrar_pagina_pdf():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
-                st.error("No se pudo extraer información. Verifica que el PDF tenga texto seleccionable.")
+                st.error("No se encontraron datos. Asegúrate de que el PDF contiene tablas legibles.")
 
 # ==========================================
 #        MENÚ LATERAL

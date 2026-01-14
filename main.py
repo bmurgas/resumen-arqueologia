@@ -191,12 +191,12 @@ def generar_word_con_formato(datos):
     return buffer
 
 # ==========================================
-#      LÓGICA EXTRACTOR PDF (V18 - HÍBRIDO)
+#      LÓGICA EXTRACTOR PDF (CORREGIDA V19)
 # ==========================================
 
 def extraer_datos_pdf(archivo_bytes):
     """
-    Estrategia doble: Busca en Tablas Y en Texto plano.
+    Estrategia doble: Tablas para datos estructurados y Regex Masivo para Descripción.
     """
     datos_extraidos = []
     
@@ -204,79 +204,84 @@ def extraer_datos_pdf(archivo_bytes):
         for pagina in pdf.pages:
             info = {}
             
-            # --- PARTE 1: INTENTO POR TABLAS (Más preciso si funciona) ---
+            # --- PARTE 1: ESCÁNER DE TABLAS (Para ID, Fecha, Coord, Resp) ---
             tablas = pagina.extract_tables()
             for tabla in tablas:
                 for fila in tabla:
-                    # Limpiamos nulos
                     fila_segura = [str(c).strip() if c else "" for c in fila]
                     
                     for i, celda in enumerate(fila_segura):
-                        # Búsqueda laxa: si la celda contiene la palabra clave
-                        if "Categoría" in celda: 
+                        # Categoría (Intento por tabla primero)
+                        if "Categoría" in celda and "SA/HA" in celda:
                             if i + 1 < len(fila_segura) and fila_segura[i+1]:
                                 info["Categoría"] = fila_segura[i+1]
 
-                        if "Descripción" in celda and "actividad" not in celda.lower():
-                            if i + 1 < len(fila_segura) and fila_segura[i+1]:
-                                info["Descripción"] = fila_segura[i+1]
-
+                        # ID Sitio
                         if "ID Sitio" in celda:
                             if i + 1 < len(fila_segura) and fila_segura[i+1]:
                                 info["ID Sitio"] = fila_segura[i+1]
 
+                        # Fecha
                         if "Fecha" in celda:
                             if i + 1 < len(fila_segura) and fila_segura[i+1]:
                                 info["Fecha"] = fila_segura[i+1]
                                 
+                        # Responsable
                         if "Responsable" in celda:
                             if i + 1 < len(fila_segura) and fila_segura[i+1]:
                                 info["Responsable"] = fila_segura[i+1]
+                        
+                        # Coordenadas
+                        if "Coord. Central Norte" in celda:
+                            if i + 1 < len(fila_segura):
+                                info["Coord. Norte"] = fila_segura[i+1]
+                        if "Coord. Central Este" in celda:
+                            if i + 1 < len(fila_segura):
+                                info["Coord. Este"] = fila_segura[i+1]
 
-            # --- PARTE 2: INTENTO POR TEXTO (Respaldo si las tablas fallan) ---
-            # Si después de las tablas falta info, la buscamos en el texto plano
+            # --- PARTE 2: ESCÁNER DE TEXTO PLANO (La solución para Descripción) ---
             texto = pagina.extract_text()
             if texto:
-                # Regex para ID
+                # 1. Descripción: Buscamos la palabra y tomamos TODO lo que sigue
+                # hasta la siguiente sección (generalmente Cronología u Observación)
+                if not info.get("Descripción"):
+                    # Esta Regex busca "Descripción" seguida de cualquier cosa (.*?)
+                    # y se detiene cuando encuentra una palabra mayúscula típica de inicio de sección o el final.
+                    patron_desc = r"Descripción\s*\n*(.*?)(?:\n\s*(?:CRONOLOGÍA|OBSERVACIONES|INTERPRETACIÓN|REGISTRO|BIBLIOGRAFÍA|OBSERVACIÓN)|$)"
+                    match_desc = re.search(patron_desc, texto, re.DOTALL | re.IGNORECASE)
+                    
+                    if match_desc: 
+                        texto_sucio = match_desc.group(1).strip()
+                        # Limpieza extra: A veces agarra palabras de la tipología si están pegadas
+                        if "Otro" in texto_sucio[:10]: 
+                            texto_sucio = texto_sucio.replace("Otro", "").strip()
+                        info["Descripción"] = texto_sucio
+
+                # 2. Respaldo para Categoría si falló la tabla
+                if not info.get("Categoría"):
+                    match_cat = re.search(r"Categoría.*?:\s*(.*?)(?:\n|Responsable|ID|$)", texto)
+                    if match_cat: info["Categoría"] = match_cat.group(1).strip()
+
+                # 3. Respaldo para ID
                 if not info.get("ID Sitio"):
                     match = re.search(r"ID Sitio:?\s*([A-Za-z0-9\-]+)", texto)
                     if match: info["ID Sitio"] = match.group(1)
                 
-                # Regex para Fecha
+                # 4. Respaldo para Fecha
                 if not info.get("Fecha"):
                     match = re.search(r"Fecha:?\s*(\d{2}[-/]\d{2}[-/]\d{4})", texto)
                     if match: info["Fecha"] = match.group(1)
 
-                # Regex para Categoría (Busca "Categoría (SA/HA):" y captura lo siguiente)
-                if not info.get("Categoría"):
-                    match = re.search(r"Categoría.*?:\s*(.*?)(?:\n|Responsable|ID|$)", texto)
-                    if match: info["Categoría"] = match.group(1).strip()
+                # 5. Respaldo Coordenadas
+                if not info.get("Coord. Norte"):
+                    match_n = re.search(r"Norte:?\s*(\d{6,8})", texto)
+                    if match_n: info["Coord. Norte"] = match_n.group(1)
+                if not info.get("Coord. Este"):
+                    match_e = re.search(r"Este:?\s*(\d{5,7})", texto)
+                    if match_e: info["Coord. Este"] = match_e.group(1)
 
-                # Regex para Descripción (Busca la palabra y captura el resto del bloque)
-                if not info.get("Descripción"):
-                    # Busca "Descripción" seguido de cualquier cosa hasta un salto de línea doble o fin de sección
-                    match = re.search(r"Descripción.*?\n(.*?)(?:\n\n|CRONOLOGÍA|TIPOLOGÍA|$)", texto, re.DOTALL)
-                    if match: 
-                        info["Descripción"] = match.group(1).strip()
-
-                # Regex para Responsable
-                if not info.get("Responsable"):
-                    match = re.search(r"Responsable:?\s*(.*?)(?:\n|$)", texto)
-                    if match: info["Responsable"] = match.group(1).strip()
-                
-                # Coordenadas (Casi siempre están sueltas en texto)
-                match_n = re.search(r"Norte:?\s*(\d{6,8})", texto)
-                if match_n: info["Coord. Norte"] = match_n.group(1)
-                
-                match_e = re.search(r"Este:?\s*(\d{5,7})", texto)
-                if match_e: info["Coord. Este"] = match_e.group(1)
-
-            # Guardamos solo si encontramos datos mínimos
-            if info:
-                # Limpieza final: Eliminar saltos de línea molestos en la descripción extraída por texto
-                if info.get("Descripción"):
-                    info["Descripción"] = info["Descripción"].replace("\n", " ")
-                
+            # Guardar si hay datos mínimos
+            if info.get("ID Sitio") or info.get("Fecha"):
                 datos_extraidos.append(info)
                 
     return datos_extraidos
@@ -321,9 +326,8 @@ def mostrar_pagina_pdf():
             if datos:
                 df = pd.DataFrame(datos)
                 cols_deseadas = ["ID Sitio", "Fecha", "Categoría", "Descripción", "Responsable", "Coord. Norte", "Coord. Este"]
-                # Filtramos solo columnas que existan para no dar error
                 cols_finales = [c for c in cols_deseadas if c in df.columns]
-                # Agregamos las que falten al final si hay extras
+                # Traer el resto de columnas si las hubiera
                 extras = [c for c in df.columns if c not in cols_deseadas]
                 df = df[cols_finales + extras]
                 

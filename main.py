@@ -61,7 +61,6 @@ def procesar_archivo_v12(archivo_bytes, nombre_archivo):
         for r_idx, fila in enumerate(tabla.rows):
             texto_fila = " ".join([c.text.strip() for c in fila.cells]).strip()
             
-            # FECHA
             if "Fecha" in texto_fila:
                 for celda in fila.cells:
                     t = celda.text.strip()
@@ -70,7 +69,6 @@ def procesar_archivo_v12(archivo_bytes, nombre_archivo):
                         fecha_persistente = t
                         break
             
-            # ACTIVIDAD
             if "Descripción de la actividad" in texto_fila:
                 mejor_texto = ""
                 celdas_fila_vistas = set()
@@ -84,13 +82,11 @@ def procesar_archivo_v12(archivo_bytes, nombre_archivo):
                 if mejor_texto:
                     datos_ficha["actividad"] = mejor_texto
 
-            # HALLAZGOS
             if "Ausencia" in texto_fila and any(c.text.strip().upper() == "X" for c in fila.cells):
                 datos_ficha["hallazgos"] = "Ausencia de hallazgos arqueológicos no previstos."
             if "Presencia" in texto_fila and any(c.text.strip().upper() == "X" for c in fila.cells):
                 datos_ficha["hallazgos"] = "PRESENCIA de hallazgos arqueológicos."
 
-            # FOTOS
             if "Registro fotográfico" in texto_fila:
                 en_seccion_fotos = True
                 continue 
@@ -195,13 +191,12 @@ def generar_word_con_formato(datos):
     return buffer
 
 # ==========================================
-#      LÓGICA EXTRACTOR PDF (CORREGIDA V17)
+#      LÓGICA EXTRACTOR PDF (V18 - HÍBRIDO)
 # ==========================================
 
 def extraer_datos_pdf(archivo_bytes):
     """
-    Lee un PDF y busca datos en las tablas, escaneando celda por celda.
-    Corrección: Busca la palabra clave en CUALQUIER celda y toma la SIGUIENTE.
+    Estrategia doble: Busca en Tablas Y en Texto plano.
     """
     datos_extraidos = []
     
@@ -209,54 +204,79 @@ def extraer_datos_pdf(archivo_bytes):
         for pagina in pdf.pages:
             info = {}
             
-            # --- ESTRATEGIA: ESCÁNER DE TABLAS ---
+            # --- PARTE 1: INTENTO POR TABLAS (Más preciso si funciona) ---
             tablas = pagina.extract_tables()
-            
             for tabla in tablas:
                 for fila in tabla:
-                    # Normalizamos la fila (None -> "")
+                    # Limpiamos nulos
                     fila_segura = [str(c).strip() if c else "" for c in fila]
                     
-                    # Recorremos cada celda buscando las etiquetas
                     for i, celda in enumerate(fila_segura):
-                        
-                        # 1. CATEGORÍA
-                        # Busca "Categoría" y verifica si hay una celda a la derecha
-                        if "Categoría" in celda and "SA/HA" in celda:
-                            if i + 1 < len(fila_segura):
+                        # Búsqueda laxa: si la celda contiene la palabra clave
+                        if "Categoría" in celda: 
+                            if i + 1 < len(fila_segura) and fila_segura[i+1]:
                                 info["Categoría"] = fila_segura[i+1]
 
-                        # 2. DESCRIPCIÓN
-                        # Busca "Descripción" a secas (para no confundir con act. realizada)
-                        if celda == "Descripción" or ("Descripción" in celda and "actividad" not in celda.lower()):
-                            if i + 1 < len(fila_segura):
+                        if "Descripción" in celda and "actividad" not in celda.lower():
+                            if i + 1 < len(fila_segura) and fila_segura[i+1]:
                                 info["Descripción"] = fila_segura[i+1]
 
-                        # 3. ID SITIO
                         if "ID Sitio" in celda:
-                            if i + 1 < len(fila_segura):
+                            if i + 1 < len(fila_segura) and fila_segura[i+1]:
                                 info["ID Sitio"] = fila_segura[i+1]
 
-                        # 4. FECHA
                         if "Fecha" in celda:
-                            if i + 1 < len(fila_segura):
+                            if i + 1 < len(fila_segura) and fila_segura[i+1]:
                                 info["Fecha"] = fila_segura[i+1]
-
-                        # 5. RESPONSABLE
+                                
                         if "Responsable" in celda:
-                            if i + 1 < len(fila_segura):
+                            if i + 1 < len(fila_segura) and fila_segura[i+1]:
                                 info["Responsable"] = fila_segura[i+1]
-                        
-                        # 6. COORDENADAS (Opcional, si están en formato tabla)
-                        if "Coord. Central Norte" in celda:
-                            if i + 1 < len(fila_segura):
-                                info["Coord. Norte"] = fila_segura[i+1]
-                        if "Coord. Central Este" in celda:
-                            if i + 1 < len(fila_segura):
-                                info["Coord. Este"] = fila_segura[i+1]
 
-            # Si encontramos datos válidos en esta página, la guardamos
-            if info.get("ID Sitio") or info.get("Fecha"):
+            # --- PARTE 2: INTENTO POR TEXTO (Respaldo si las tablas fallan) ---
+            # Si después de las tablas falta info, la buscamos en el texto plano
+            texto = pagina.extract_text()
+            if texto:
+                # Regex para ID
+                if not info.get("ID Sitio"):
+                    match = re.search(r"ID Sitio:?\s*([A-Za-z0-9\-]+)", texto)
+                    if match: info["ID Sitio"] = match.group(1)
+                
+                # Regex para Fecha
+                if not info.get("Fecha"):
+                    match = re.search(r"Fecha:?\s*(\d{2}[-/]\d{2}[-/]\d{4})", texto)
+                    if match: info["Fecha"] = match.group(1)
+
+                # Regex para Categoría (Busca "Categoría (SA/HA):" y captura lo siguiente)
+                if not info.get("Categoría"):
+                    match = re.search(r"Categoría.*?:\s*(.*?)(?:\n|Responsable|ID|$)", texto)
+                    if match: info["Categoría"] = match.group(1).strip()
+
+                # Regex para Descripción (Busca la palabra y captura el resto del bloque)
+                if not info.get("Descripción"):
+                    # Busca "Descripción" seguido de cualquier cosa hasta un salto de línea doble o fin de sección
+                    match = re.search(r"Descripción.*?\n(.*?)(?:\n\n|CRONOLOGÍA|TIPOLOGÍA|$)", texto, re.DOTALL)
+                    if match: 
+                        info["Descripción"] = match.group(1).strip()
+
+                # Regex para Responsable
+                if not info.get("Responsable"):
+                    match = re.search(r"Responsable:?\s*(.*?)(?:\n|$)", texto)
+                    if match: info["Responsable"] = match.group(1).strip()
+                
+                # Coordenadas (Casi siempre están sueltas en texto)
+                match_n = re.search(r"Norte:?\s*(\d{6,8})", texto)
+                if match_n: info["Coord. Norte"] = match_n.group(1)
+                
+                match_e = re.search(r"Este:?\s*(\d{5,7})", texto)
+                if match_e: info["Coord. Este"] = match_e.group(1)
+
+            # Guardamos solo si encontramos datos mínimos
+            if info:
+                # Limpieza final: Eliminar saltos de línea molestos en la descripción extraída por texto
+                if info.get("Descripción"):
+                    info["Descripción"] = info["Descripción"].replace("\n", " ")
+                
                 datos_extraidos.append(info)
                 
     return datos_extraidos
@@ -290,20 +310,22 @@ def mostrar_pagina_word():
 
 def mostrar_pagina_pdf():
     st.title("Extractor de Fichas PDF a Excel")
-    st.markdown("Extrae datos de fichas de hallazgo (Tablas PDF).")
+    st.markdown("Extrae datos de fichas de hallazgo (Tablas o Texto).")
     
     archivo_pdf = st.file_uploader("Subir PDF de Hallazgos (.pdf)", type="pdf", key="pdf_up")
     
     if archivo_pdf and st.button("Procesar PDF y Crear Excel"):
-        with st.spinner("Escaneando tablas del PDF..."):
+        with st.spinner("Escaneando PDF..."):
             datos = extraer_datos_pdf(archivo_pdf.read())
             
             if datos:
                 df = pd.DataFrame(datos)
-                # Ordenar columnas lógicamente
                 cols_deseadas = ["ID Sitio", "Fecha", "Categoría", "Descripción", "Responsable", "Coord. Norte", "Coord. Este"]
+                # Filtramos solo columnas que existan para no dar error
                 cols_finales = [c for c in cols_deseadas if c in df.columns]
-                df = df[cols_finales]
+                # Agregamos las que falten al final si hay extras
+                extras = [c for c in df.columns if c not in cols_deseadas]
+                df = df[cols_finales + extras]
                 
                 st.success(f"✅ Se extrajeron {len(df)} fichas.")
                 st.dataframe(df) 
@@ -319,7 +341,7 @@ def mostrar_pagina_pdf():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
-                st.error("No se encontraron datos. Asegúrate de que el PDF contiene tablas legibles.")
+                st.error("No se encontraron datos. El PDF podría ser una imagen escaneada (sin texto seleccionable).")
 
 # ==========================================
 #        MENÚ LATERAL

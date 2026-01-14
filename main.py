@@ -13,7 +13,7 @@ import re
 st.set_page_config(page_title="Arqueología - Suite de Herramientas", layout="wide")
 
 # ==========================================
-#      LÓGICA GENERADOR WORD (INTACTA)
+#      LÓGICA GENERADOR WORD (INTACTA DEL TXT)
 # ==========================================
 
 def obtener_imagenes_con_id(elemento_xml, doc_relacionado):
@@ -195,82 +195,105 @@ def generar_word_con_formato(datos):
     return buffer
 
 # ==========================================
-#      LÓGICA EXTRACTOR PDF (NUEVO)
+#      LÓGICA EXTRACTOR PDF (MODIFICADA)
 # ==========================================
 
 def extraer_datos_pdf(archivo_bytes):
     """
-    Lee un PDF y busca patrones específicos usando Regex.
+    Lee un PDF y busca datos. 
+    MODIFICACIÓN: Intenta leer como TABLA primero para encontrar "la celda de al lado".
     """
     datos_extraidos = []
     
     with pdfplumber.open(io.BytesIO(archivo_bytes)) as pdf:
-        # Asumimos que cada página es una ficha o contiene una ficha
-        # Si una ficha ocupa más de una página, esto captura por página.
-        
         for pagina in pdf.pages:
-            texto = pagina.extract_text()
-            if not texto: continue
-            
             info = {}
+            encontrado_en_tabla = False
             
-            # --- 1. ID SITIO ---
-            # Buscamos "ID Sitio" o patrones tipo "HA-01"
-            # Regex: Busca "ID Sitio:" seguido de algo, O busca "HA-" seguido de números
-            match_id = re.search(r"ID Sitio:?\s*([A-Za-z0-9\-]+)", texto, re.IGNORECASE)
-            if not match_id:
-                # Intento alternativo: buscar código tipo HA-XX
-                match_id = re.search(r"(HA-\d+|SA-\d+)", texto)
-            info["ID Sitio"] = match_id.group(1) if match_id else "No encontrado"
+            # --- ESTRATEGIA 1: BUSCAR EN TABLAS (Celda de al lado) ---
+            # Esto soluciona lo de "Categoría (SA/HA):" y "Descripción"
+            tablas = pagina.extract_tables()
+            
+            for tabla in tablas:
+                # Recorremos cada fila de la tabla detectada
+                for fila in tabla:
+                    # Limpiamos nulos
+                    fila_limpia = [str(c).strip() if c else "" for c in fila]
+                    
+                    # Necesitamos al menos 2 celdas para tener "Etiqueta" y "Valor"
+                    if len(fila_limpia) < 2: continue
+                    
+                    etiqueta = fila_limpia[0] # Celda Izquierda
+                    valor = fila_limpia[1]    # Celda Derecha (Celda de al lado)
+                    
+                    # 1. CATEGORÍA
+                    if "Categoría" in etiqueta: 
+                        info["Categoría"] = valor
+                        encontrado_en_tabla = True
 
-            # --- 2. FECHA ---
-            # Busca patrones DD-MM-AAAA o DD/MM/AAAA
-            match_fecha = re.search(r"(\d{2}[-/]\d{2}[-/]\d{4})", texto)
-            info["Fecha"] = match_fecha.group(1) if match_fecha else "No encontrada"
+                    # 2. DESCRIPCIÓN (Evitando "Descripción de la actividad" si es distinta)
+                    # Si dice solo "Descripción" o "Descripción del hallazgo"
+                    if "Descripción" in etiqueta and "actividad" not in etiqueta.lower():
+                        info["Descripción"] = valor
+                        encontrado_en_tabla = True
 
-            # --- 3. COORDENADAS ---
-            # Busca "Norte" seguido de números (6-7 dígitos)
-            match_norte = re.search(r"Norte:?\s*.*?(\d{6,8})", texto, re.IGNORECASE | re.DOTALL)
-            info["Coord. Norte"] = match_norte.group(1) if match_norte else ""
+                    # 3. ID SITIO
+                    if "ID Sitio" in etiqueta or "Código" in etiqueta:
+                        info["ID Sitio"] = valor
+                        encontrado_en_tabla = True
+                    
+                    # 4. FECHA
+                    if "Fecha" in etiqueta:
+                        info["Fecha"] = valor
+                        encontrado_en_tabla = True
 
-            # Busca "Este" seguido de números
-            match_este = re.search(r"Este:?\s*.*?(\d{5,7})", texto, re.IGNORECASE | re.DOTALL)
-            info["Coord. Este"] = match_este.group(1) if match_este else ""
+                    # 5. RESPONSABLE
+                    if "Responsable" in etiqueta:
+                        info["Responsable"] = valor
+                        encontrado_en_tabla = True
+            
+            # --- ESTRATEGIA 2: TEXTO PLANO (RESPALDO DEL TXT ORIGINAL) ---
+            # Si no encontró nada en tablas, o para complementar, usamos Regex
+            texto = pagina.extract_text()
+            if texto:
+                # ID (Si no lo tenemos)
+                if "ID Sitio" not in info:
+                    match_id = re.search(r"ID Sitio:?\s*([A-Za-z0-9\-]+)", texto, re.IGNORECASE)
+                    if not match_id: match_id = re.search(r"(HA-\d+|SA-\d+)", texto)
+                    info["ID Sitio"] = match_id.group(1) if match_id else "No encontrado"
+                
+                # Fecha
+                if "Fecha" not in info:
+                    match_fecha = re.search(r"(\d{2}[-/]\d{2}[-/]\d{4})", texto)
+                    info["Fecha"] = match_fecha.group(1) if match_fecha else "No encontrada"
 
-            # --- 4. CATEGORÍA (SA/HA) ---
-            # Busca "Categoría" y toma las palabras siguientes, o busca directamente HA/SA aislado
-            match_cat = re.search(r"Categoría.*?(SA|HA)", texto, re.IGNORECASE | re.DOTALL)
-            if match_cat:
-                info["Categoría"] = match_cat.group(1)
-            else:
-                # Si no encuentra "Categoría:", busca si hay un "HA" o "SA" suelto que no sea el ID
-                if "HA" in texto and "SA" not in texto: info["Categoría"] = "HA"
-                elif "SA" in texto and "HA" not in texto: info["Categoría"] = "SA"
-                else: info["Categoría"] = ""
+                # Coordenadas (Estas suelen estar en texto suelto)
+                match_norte = re.search(r"Norte:?\s*.*?(\d{6,8})", texto, re.IGNORECASE | re.DOTALL)
+                info["Coord. Norte"] = match_norte.group(1) if match_norte else ""
 
-            # --- 5. RESPONSABLE ---
-            # Busca "Responsable:" y captura hasta el salto de línea
-            match_resp = re.search(r"Responsable:?\s*(.*?)(?:\n|$)", texto, re.IGNORECASE)
-            if match_resp:
-                # Limpiamos si agarró caracteres raros
-                clean_resp = match_resp.group(1).replace("\n", " ").strip()
-                info["Responsable"] = clean_resp
-            else:
-                info["Responsable"] = ""
+                match_este = re.search(r"Este:?\s*.*?(\d{5,7})", texto, re.IGNORECASE | re.DOTALL)
+                info["Coord. Este"] = match_este.group(1) if match_este else ""
 
-            # --- 6. DESCRIPCIÓN ---
-            # Esta es difícil. Buscamos bloques de texto comunes.
-            # Intento 1: Buscar "Descripción" y tomar lo que sigue
-            match_desc = re.search(r"Descripción.*?\n(.*?)(?:\n\n|Evidencias|Cronología|$)", texto, re.IGNORECASE | re.DOTALL)
-            if match_desc:
-                info["Descripción"] = match_desc.group(1).strip()
-            else:
-                # Intento 2: Buscar "Descripción de las evidencias"
-                match_desc2 = re.search(r"descripción de las evidencias\s*\n(.*?)(?:\n\n|Asociación|$)", texto, re.IGNORECASE | re.DOTALL)
-                info["Descripción"] = match_desc2.group(1).strip() if match_desc2 else ""
+                # Categoría (Respaldo Regex)
+                if "Categoría" not in info:
+                    match_cat = re.search(r"Categoría.*?(SA|HA)", texto, re.IGNORECASE | re.DOTALL)
+                    if match_cat: info["Categoría"] = match_cat.group(1)
+                    else:
+                        if "HA" in texto and "SA" not in texto: info["Categoría"] = "HA"
+                        elif "SA" in texto and "HA" not in texto: info["Categoría"] = "SA"
 
-            # Solo agregamos si encontramos al menos un ID o una Fecha para evitar páginas vacías
-            if info["ID Sitio"] != "No encontrado" or info["Fecha"] != "No encontrada":
+                # Descripción (Respaldo Regex)
+                if "Descripción" not in info:
+                    match_desc = re.search(r"Descripción.*?\n(.*?)(?:\n\n|Evidencias|Cronología|$)", texto, re.IGNORECASE | re.DOTALL)
+                    if match_desc: info["Descripción"] = match_desc.group(1).strip()
+
+                # Responsable (Respaldo Regex)
+                if "Responsable" not in info:
+                    match_resp = re.search(r"Responsable:?\s*(.*?)(?:\n|$)", texto, re.IGNORECASE)
+                    if match_resp: info["Responsable"] = match_resp.group(1).replace("\n", " ").strip()
+
+            # Guardamos si hay algo útil
+            if info.get("ID Sitio") != "No encontrado" or info.get("Fecha") != "No encontrada":
                 datos_extraidos.append(info)
                 
     return datos_extraidos
@@ -314,17 +337,14 @@ def mostrar_pagina_pdf():
             
             if datos:
                 df = pd.DataFrame(datos)
-                
-                # Reordenar columnas para que salga bonito
+                # Orden de columnas para el Excel
                 columnas_orden = ["ID Sitio", "Fecha", "Categoría", "Coord. Norte", "Coord. Este", "Responsable", "Descripción"]
-                # Asegurarnos de que existan en el DF (por si acaso)
                 cols_existentes = [c for c in columnas_orden if c in df.columns]
                 df = df[cols_existentes]
                 
                 st.success(f"✅ Se extrajeron {len(df)} registros.")
-                st.dataframe(df) # Muestra una vista previa en la web
+                st.dataframe(df) 
                 
-                # Generar Excel en memoria
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                     df.to_excel(writer, index=False, sheet_name="Hallazgos")
@@ -336,7 +356,7 @@ def mostrar_pagina_pdf():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
-                st.error("No se pudo extraer información. Verifica que el PDF tenga texto seleccionable (no sea solo imagen escaneada).")
+                st.error("No se pudo extraer información. Verifica que el PDF tenga texto seleccionable.")
 
 # ==========================================
 #        MENÚ LATERAL

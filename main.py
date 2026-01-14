@@ -5,16 +5,10 @@ from docx.oxml.ns import qn
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 import io
-import pandas as pd
-import pdfplumber
-import re
 
-# --- CONFIGURACIÓN GLOBAL ---
-st.set_page_config(page_title="Arqueología - Suite de Herramientas", layout="wide")
+st.set_page_config(page_title="Generador MAP V13 (Extracción Exacta)", layout="wide")
 
-# ==========================================
-#      LÓGICA GENERADOR WORD (INTACTA)
-# ==========================================
+# --- FUNCIONES AUXILIARES ---
 
 def obtener_imagenes_con_id(elemento_xml, doc_relacionado):
     resultados = [] 
@@ -40,7 +34,7 @@ def obtener_texto_celda_abajo(tabla, fila_idx, col_idx):
         pass
     return ""
 
-def procesar_archivo_v12(archivo_bytes, nombre_archivo):
+def procesar_archivo_v13(archivo_bytes, nombre_archivo):
     try:
         doc = Document(io.BytesIO(archivo_bytes))
     except Exception as e:
@@ -52,8 +46,14 @@ def procesar_archivo_v12(archivo_bytes, nombre_archivo):
 
     for tabla in doc.tables:
         datos_ficha = {
-            "fecha_propia": None, "actividad": "", "hallazgos": "", "items_foto": [] 
+            "fecha_propia": None,
+            "actividad": "",     # La actividad general
+            "categoria": "",     # SA o HA
+            "descripcion_item": "", # La descripción del lítico/hallazgo
+            "hallazgos_check": "",  # Si hubo X en Ausencia/Presencia
+            "items_foto": [] 
         }
+        
         rids_procesados = set()
         celdas_procesadas = set()
         en_seccion_fotos = False
@@ -61,7 +61,7 @@ def procesar_archivo_v12(archivo_bytes, nombre_archivo):
         for r_idx, fila in enumerate(tabla.rows):
             texto_fila = " ".join([c.text.strip() for c in fila.cells]).strip()
             
-            # FECHA
+            # --- 1. FECHA ---
             if "Fecha" in texto_fila:
                 for celda in fila.cells:
                     t = celda.text.strip()
@@ -70,27 +70,48 @@ def procesar_archivo_v12(archivo_bytes, nombre_archivo):
                         fecha_persistente = t
                         break
             
-            # ACTIVIDAD
+            # --- 2. EXTRACCIÓN POR PARES (Titulo -> Valor al lado) ---
+            # Recorremos las celdas para encontrar los títulos y sacar el valor de la derecha
+            for c_idx, celda in enumerate(fila.cells):
+                txt_celda = celda.text.strip()
+                
+                # A) CATEGORÍA
+                if "Categoría" in txt_celda: # Busca "Categoría (SA/HA):"
+                    # Intentamos tomar la celda siguiente (c_idx + 1)
+                    if c_idx + 1 < len(fila.cells):
+                        valor = fila.cells[c_idx + 1].text.strip()
+                        if valor: datos_ficha["categoria"] = valor
+                
+                # B) DESCRIPCIÓN (Específica del item)
+                # Ojo: A veces dice "Descripción de la actividad" (esa es otra).
+                # Buscamos "Descripción" a secas o que NO tenga "actividad" para no confundir
+                elif "Descripción" in txt_celda and "actividad" not in txt_celda:
+                    if c_idx + 1 < len(fila.cells):
+                        valor = fila.cells[c_idx + 1].text.strip()
+                        if valor: datos_ficha["descripcion_item"] = valor
+
+            # --- 3. ACTIVIDAD GENERAL ---
             if "Descripción de la actividad" in texto_fila:
                 mejor_texto = ""
-                celdas_fila_vistas = set()
+                celdas_vistas = set()
                 for celda in fila.cells:
-                    if celda in celdas_fila_vistas: continue
-                    celdas_fila_vistas.add(celda)
+                    if celda in celdas_vistas: continue
+                    celdas_vistas.add(celda)
                     t = celda.text.strip()
+                    # Ignoramos el título mismo
                     if "Descripción" in t or "Actividad" in t: continue
                     if len(t) > len(mejor_texto):
                         mejor_texto = t
                 if mejor_texto:
                     datos_ficha["actividad"] = mejor_texto
 
-            # HALLAZGOS
+            # --- 4. HALLAZGOS (Check X) ---
             if "Ausencia" in texto_fila and any(c.text.strip().upper() == "X" for c in fila.cells):
-                datos_ficha["hallazgos"] = "Ausencia de hallazgos arqueológicos no previstos."
+                datos_ficha["hallazgos_check"] = "Ausencia de hallazgos arqueológicos no previstos."
             if "Presencia" in texto_fila and any(c.text.strip().upper() == "X" for c in fila.cells):
-                datos_ficha["hallazgos"] = "PRESENCIA de hallazgos arqueológicos."
+                datos_ficha["hallazgos_check"] = "PRESENCIA de hallazgos arqueológicos."
 
-            # FOTOS
+            # --- 5. FOTOS ---
             if "Registro fotográfico" in texto_fila:
                 en_seccion_fotos = True
                 continue 
@@ -114,21 +135,46 @@ def procesar_archivo_v12(archivo_bytes, nombre_archivo):
                             })
                 celdas_procesadas.clear() 
 
+        # --- CONSOLIDACIÓN DE DATOS ---
         fecha_final = datos_ficha["fecha_propia"] if datos_ficha["fecha_propia"] else fecha_persistente
         
-        if datos_ficha["actividad"] or datos_ficha["items_foto"]:
-            texto_central = datos_ficha["actividad"]
-            if datos_ficha["hallazgos"]:
-                texto_central += f"\n\n[Hallazgos: {datos_ficha['hallazgos']}]"
+        # Validar si guardamos la ficha
+        hay_info = (datos_ficha["actividad"] or datos_ficha["items_foto"] or 
+                    datos_ficha["categoria"] or datos_ficha["descripcion_item"])
+        
+        if hay_info:
+            # Construimos el Texto Central combinando todo lo encontrado
+            partes_texto = []
+            
+            if datos_ficha["actividad"]:
+                partes_texto.append(datos_ficha["actividad"])
+            
+            # Agregamos Categoría y Descripción si existen
+            if datos_ficha["categoria"]:
+                partes_texto.append(f"Categoría: {datos_ficha['categoria']}")
+                
+            if datos_ficha["descripcion_item"]:
+                partes_texto.append(f"Descripción: {datos_ficha['descripcion_item']}")
+            
+            # Agregamos el check de hallazgos al final
+            if datos_ficha["hallazgos_check"]:
+                partes_texto.append(f"\n[Hallazgos: {datos_ficha['hallazgos_check']}]")
+            
+            texto_consolidado = "\n\n".join(partes_texto)
             
             fichas_extraidas.append({
-                "fecha": fecha_final, "texto_central": texto_central, "fotos": datos_ficha["items_foto"]
+                "fecha": fecha_final, 
+                "texto_central": texto_consolidado, 
+                "fotos": datos_ficha["items_foto"]
             })
 
     return fichas_extraidas
 
-def generar_word_con_formato(datos):
+# --- GENERACIÓN WORD (ESTILO FRANKLIN MANTENIDO) ---
+def generar_word_v13(datos):
     doc = Document()
+    
+    # Título
     titulo = doc.add_heading('Tabla Resumen Monitoreo Arqueológico', 0)
     titulo.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
@@ -137,6 +183,7 @@ def generar_word_con_formato(datos):
     tabla.autofit = False
     tabla.alignment = WD_TABLE_ALIGNMENT.CENTER 
 
+    # Encabezados
     headers = tabla.rows[0].cells
     titulos = ["Fecha", "Actividades realizadas durante el MAP", "Imagen de la actividad"]
     
@@ -148,24 +195,29 @@ def generar_word_con_formato(datos):
         run.bold = True
         parrafo.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
+    # Anchos
     for c in tabla.columns[0].cells: c.width = Cm(2.5) 
     for c in tabla.columns[1].cells: c.width = Cm(7.5) 
     for c in tabla.columns[2].cells: c.width = Cm(8.5) 
 
     for item in datos:
         row = tabla.add_row().cells
+        
+        # 1. FECHA
         p_fecha = row[0].paragraphs[0]
         p_fecha.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r_fecha = p_fecha.add_run(str(item["fecha"]))
         r_fecha.font.name = 'Franklin Gothic Book'
         r_fecha.font.size = Pt(9)
 
+        # 2. TEXTO (Ahora incluye Categoría y Descripción)
         p_act = row[1].paragraphs[0]
         p_act.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         r_act = p_act.add_run(str(item["texto_central"]))
         r_act.font.name = 'Franklin Gothic Book'
         r_act.font.size = Pt(9)
         
+        # 3. FOTOS
         celda_img = row[2]
         p_img = celda_img.paragraphs[0]
         p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER 
@@ -179,11 +231,13 @@ def generar_word_con_formato(datos):
                 try:
                     run = p_img.add_run()
                     run.add_picture(io.BytesIO(foto_obj["blob"]), width=Cm(8), height=Cm(6))
+                    
                     if foto_obj["leyenda"]:
                         r_leyenda = p_img.add_run(f"\n{foto_obj['leyenda']}")
                         r_leyenda.font.name = 'Franklin Gothic Book'
                         r_leyenda.font.size = Pt(9)
                         r_leyenda.italic = True
+                    
                     if i < len(item["fotos"]) - 1:
                         p_img.add_run("\n\n")
                 except:
@@ -194,158 +248,26 @@ def generar_word_con_formato(datos):
     buffer.seek(0)
     return buffer
 
-# ==========================================
-#      LÓGICA EXTRACTOR PDF (NUEVO)
-# ==========================================
+# --- INTERFAZ ---
+st.title("Generador MAP V13 (Extracción de Categoría y Descripción)")
+st.info("Ahora extrae correctamente los campos 'Categoría' y 'Descripción' de sus celdas adyacentes.")
 
-def extraer_datos_pdf(archivo_bytes):
-    """
-    Lee un PDF y busca patrones específicos usando Regex.
-    """
-    datos_extraidos = []
+archivos = st.file_uploader("Sube Anexos (.docx)", accept_multiple_files=True)
+debug = st.checkbox("Ver Logs")
+
+if archivos and st.button("Generar Tabla"):
+    todas = []
+    bar = st.progress(0)
     
-    with pdfplumber.open(io.BytesIO(archivo_bytes)) as pdf:
-        # Asumimos que cada página es una ficha o contiene una ficha
-        # Si una ficha ocupa más de una página, esto captura por página.
-        
-        for pagina in pdf.pages:
-            texto = pagina.extract_text()
-            if not texto: continue
-            
-            info = {}
-            
-            # --- 1. ID SITIO ---
-            # Buscamos "ID Sitio" o patrones tipo "HA-01"
-            # Regex: Busca "ID Sitio:" seguido de algo, O busca "HA-" seguido de números
-            match_id = re.search(r"ID Sitio:?\s*([A-Za-z0-9\-]+)", texto, re.IGNORECASE)
-            if not match_id:
-                # Intento alternativo: buscar código tipo HA-XX
-                match_id = re.search(r"(HA-\d+|SA-\d+)", texto)
-            info["ID Sitio"] = match_id.group(1) if match_id else "No encontrado"
+    for i, a in enumerate(archivos):
+        fichas = procesar_archivo_v13(a.read(), a.name)
+        todas.extend(fichas)
+        bar.progress((i+1)/len(archivos))
 
-            # --- 2. FECHA ---
-            # Busca patrones DD-MM-AAAA o DD/MM/AAAA
-            match_fecha = re.search(r"(\d{2}[-/]\d{2}[-/]\d{4})", texto)
-            info["Fecha"] = match_fecha.group(1) if match_fecha else "No encontrada"
-
-            # --- 3. COORDENADAS ---
-            # Busca "Norte" seguido de números (6-7 dígitos)
-            match_norte = re.search(r"Norte:?\s*.*?(\d{6,8})", texto, re.IGNORECASE | re.DOTALL)
-            info["Coord. Norte"] = match_norte.group(1) if match_norte else ""
-
-            # Busca "Este" seguido de números
-            match_este = re.search(r"Este:?\s*.*?(\d{5,7})", texto, re.IGNORECASE | re.DOTALL)
-            info["Coord. Este"] = match_este.group(1) if match_este else ""
-
-            # --- 4. CATEGORÍA (SA/HA) ---
-            # Busca "Categoría" y toma las palabras siguientes, o busca directamente HA/SA aislado
-            match_cat = re.search(r"Categoría.*?(SA|HA)", texto, re.IGNORECASE | re.DOTALL)
-            if match_cat:
-                info["Categoría"] = match_cat.group(1)
-            else:
-                # Si no encuentra "Categoría:", busca si hay un "HA" o "SA" suelto que no sea el ID
-                if "HA" in texto and "SA" not in texto: info["Categoría"] = "HA"
-                elif "SA" in texto and "HA" not in texto: info["Categoría"] = "SA"
-                else: info["Categoría"] = ""
-
-            # --- 5. RESPONSABLE ---
-            # Busca "Responsable:" y captura hasta el salto de línea
-            match_resp = re.search(r"Responsable:?\s*(.*?)(?:\n|$)", texto, re.IGNORECASE)
-            if match_resp:
-                # Limpiamos si agarró caracteres raros
-                clean_resp = match_resp.group(1).replace("\n", " ").strip()
-                info["Responsable"] = clean_resp
-            else:
-                info["Responsable"] = ""
-
-            # --- 6. DESCRIPCIÓN ---
-            # Esta es difícil. Buscamos bloques de texto comunes.
-            # Intento 1: Buscar "Descripción" y tomar lo que sigue
-            match_desc = re.search(r"Descripción.*?\n(.*?)(?:\n\n|Evidencias|Cronología|$)", texto, re.IGNORECASE | re.DOTALL)
-            if match_desc:
-                info["Descripción"] = match_desc.group(1).strip()
-            else:
-                # Intento 2: Buscar "Descripción de las evidencias"
-                match_desc2 = re.search(r"descripción de las evidencias\s*\n(.*?)(?:\n\n|Asociación|$)", texto, re.IGNORECASE | re.DOTALL)
-                info["Descripción"] = match_desc2.group(1).strip() if match_desc2 else ""
-
-            # Solo agregamos si encontramos al menos un ID o una Fecha para evitar páginas vacías
-            if info["ID Sitio"] != "No encontrado" or info["Fecha"] != "No encontrada":
-                datos_extraidos.append(info)
-                
-    return datos_extraidos
-
-# ==========================================
-#          PÁGINAS DE LA APP
-# ==========================================
-
-def mostrar_pagina_word():
-    st.title("Generador Word MAP")
-    st.markdown("Crea la tabla resumen mensual a partir de los anexos diarios.")
-    st.info("Configuración: Franklin Gothic Book 9 | Fotos 8x6 cm | Centrado")
-
-    archivos = st.file_uploader("Subir Anexos Word (.docx)", accept_multiple_files=True, key="word_up")
-    
-    if archivos and st.button("Generar Informe Word"):
-        todas = []
-        bar = st.progress(0)
-        for i, a in enumerate(archivos):
-            fichas = procesar_archivo_v12(a.read(), a.name)
-            todas.extend(fichas)
-            bar.progress((i+1)/len(archivos))
-
-        if todas:
-            todas.sort(key=lambda x: x['fecha'] if x['fecha'] else "ZZZ")
-            doc_out = generar_word_con_formato(todas)
-            st.success("✅ Informe Word generado.")
-            st.download_button("Descargar Word", doc_out, "Resumen_MAP.docx")
-        else:
-            st.error("No se encontraron datos.")
-
-def mostrar_pagina_pdf():
-    st.title("Extractor de Fichas PDF a Excel")
-    st.markdown("Extrae ID, Coordenadas, Categoría, Descripción y Responsables de las fichas PDF.")
-    
-    archivo_pdf = st.file_uploader("Subir PDF de Hallazgos (.pdf)", type="pdf", key="pdf_up")
-    
-    if archivo_pdf and st.button("Procesar PDF y Crear Excel"):
-        with st.spinner("Leyendo PDF... esto puede tomar unos segundos."):
-            datos = extraer_datos_pdf(archivo_pdf.read())
-            
-            if datos:
-                df = pd.DataFrame(datos)
-                
-                # Reordenar columnas para que salga bonito
-                columnas_orden = ["ID Sitio", "Fecha", "Categoría", "Coord. Norte", "Coord. Este", "Responsable", "Descripción"]
-                # Asegurarnos de que existan en el DF (por si acaso)
-                cols_existentes = [c for c in columnas_orden if c in df.columns]
-                df = df[cols_existentes]
-                
-                st.success(f"✅ Se extrajeron {len(df)} registros.")
-                st.dataframe(df) # Muestra una vista previa en la web
-                
-                # Generar Excel en memoria
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    df.to_excel(writer, index=False, sheet_name="Hallazgos")
-                
-                st.download_button(
-                    label="⬇️ Descargar Planilla Excel",
-                    data=buffer.getvalue(),
-                    file_name="Base_Datos_Hallazgos.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            else:
-                st.error("No se pudo extraer información. Verifica que el PDF tenga texto seleccionable (no sea solo imagen escaneada).")
-
-# ==========================================
-#        MENÚ LATERAL
-# ==========================================
-
-st.sidebar.title("Arqueología App")
-opcion = st.sidebar.radio("Herramientas:", ["Generador Word (MAP)", "Extractor PDF a Excel"])
-
-if opcion == "Generador Word (MAP)":
-    mostrar_pagina_word()
-elif opcion == "Extractor PDF a Excel":
-    mostrar_pagina_pdf()
+    if todas:
+        todas.sort(key=lambda x: x['fecha'] if x['fecha'] else "ZZZ")
+        doc_out = generar_word_v13(todas)
+        st.success("Tabla generada con datos completos.")
+        st.download_button("Descargar Tabla Resumen.docx", doc_out, "Resumen_MAP_V13.docx")
+    else:
+        st.error("No se encontraron datos.")

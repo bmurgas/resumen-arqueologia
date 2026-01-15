@@ -193,235 +193,189 @@ def generar_word_con_formato(datos):
     return buffer
 
 # ==========================================
-#      LÓGICA EXTRACTOR PDF A EXCEL (MEJORADA V24 - CON CRONOLOGÍA)
+#   LÓGICA UNIVERSAL DE EXTRACCIÓN PDF (V25)
+#   (Se usa tanto para el Excel como para el Word con Foto)
 # ==========================================
 
-def extraer_datos_pdf(archivo_bytes):
-    datos_extraidos = []
-    # Palabras fin para cortar la descripción
+def extraer_datos_pdf_universal(pagina):
+    """
+    Función robusta que usa Tablas + Regex + Búsqueda de Líneas
+    para garantizar que se encuentre la información.
+    """
+    info = {"Cronología": ""}
     palabras_fin = ["CRONOLOGÍA", "OBSERVACIONES", "INTERPRETACIÓN", "REGISTRO", "BIBLIOGRAFÍA", "TIPOLOGÍA", "ASOCIACIÓN"]
     
-    # Opciones de Cronología a buscar
-    opciones_crono = ["Prehispánico", "Subactual (post 1950)", "Incierto", "Histórico"]
-    
-    with pdfplumber.open(io.BytesIO(archivo_bytes)) as pdf:
-        for pagina in pdf.pages:
-            info = {"Cronología": ""} # Inicializamos vacía
-            
-            # 1. TABLAS (Búsqueda estructurada + Cronología con X)
-            tablas = pagina.extract_tables()
-            for tabla in tablas:
-                for fila in tabla:
-                    fila = [str(c).strip() if c else "" for c in fila]
-                    for i, celda in enumerate(fila):
-                        celda_clean = celda.replace("\n", " ").strip()
-                        
-                        # Datos Generales
-                        if "Categoría" in celda and "SA/HA" in celda:
-                            if i + 1 < len(fila): info["Categoría"] = fila[i+1]
-                        if "ID Sitio" in celda:
-                            if i + 1 < len(fila): info["ID Sitio"] = fila[i+1]
-                        if "Fecha" in celda:
-                            if i + 1 < len(fila): info["Fecha"] = fila[i+1]
-                        if "Responsable" in celda:
-                            if i + 1 < len(fila): info["Responsable"] = fila[i+1]
-                        if "Coord. Central Norte" in celda:
-                            if i + 1 < len(fila): info["Coord. Norte"] = fila[i+1]
-                        if "Coord. Central Este" in celda:
-                            if i + 1 < len(fila): info["Coord. Este"] = fila[i+1]
-                        
-                        # --- NUEVO: CRONOLOGÍA (Detectar X) ---
-                        # Buscamos si la celda actual es una de las opciones
-                        for op in opciones_crono:
-                            if op in celda_clean:
-                                # Verificamos si la celda de al lado tiene una "X"
-                                if i + 1 < len(fila):
-                                    valor_vecino = fila[i+1].upper()
-                                    if "X" in valor_vecino:
-                                        info["Cronología"] = op
-                        
-                        # Caso especial: Periodo específico
-                        if "Periodo específico" in celda_clean:
-                            if i + 1 < len(fila):
-                                valor_vecino = fila[i+1].strip()
-                                if valor_vecino and valor_vecino.upper() != "X": # Si hay texto escrito
-                                    info["Cronología"] = f"Periodo específico: {valor_vecino}"
-
-            # 2. TEXTO (Descripción y Respaldos)
-            texto = pagina.extract_text()
-            if texto:
-                # Descripción (Corte quirúrgico)
-                if not info.get("Descripción"):
-                    patron = r"Descripción\s*\n*(.*?)(?=" + "|".join(palabras_fin) + r"|$)"
-                    match = re.search(patron, texto, re.DOTALL | re.IGNORECASE)
-                    if match:
-                        contenido = match.group(1).strip()
-                        es_titulo = False
-                        for p in palabras_fin:
-                            if contenido.upper().startswith(p):
-                                es_titulo = True; break
-                        if es_titulo: info["Descripción"] = ""
-                        else:
-                            if contenido.startswith("Otro"): contenido = contenido.replace("Otro", "", 1).strip()
-                            info["Descripción"] = contenido
-                    else: info["Descripción"] = ""
-
-                # Respaldos Regex
-                if not info.get("ID Sitio"):
-                    match = re.search(r"ID Sitio:?\s*([A-Za-z0-9\-]+)", texto)
-                    if match: info["ID Sitio"] = match.group(1)
-                if not info.get("Fecha"):
-                    match = re.search(r"Fecha:?\s*(\d{2}[-/]\d{2}[-/]\d{4})", texto)
-                    if match: info["Fecha"] = match.group(1)
-                if not info.get("Categoría"):
-                    match = re.search(r"Categoría.*?:\s*(.*?)(?:\n|Responsable|ID|$)", texto)
-                    if match: info["Categoría"] = match.group(1).strip()
-                if not info.get("Coord. Norte"):
-                    match = re.search(r"Norte:?\s*(\d{6,8})", texto)
-                    if match: info["Coord. Norte"] = match.group(1)
-                if not info.get("Coord. Este"):
-                    match = re.search(r"Este:?\s*(\d{5,7})", texto)
-                    if match: info["Coord. Este"] = match.group(1)
-                if not info.get("Responsable"):
-                    match = re.search(r"Responsable:?\s*(.*?)(?:\n|$)", texto)
-                    if match: info["Responsable"] = match.group(1).strip()
-
-            if info.get("ID Sitio") or info.get("Fecha"):
-                datos_extraidos.append(info)
+    # 1. INTENTO POR TABLAS (Primera pasada)
+    tablas = pagina.extract_tables()
+    for tabla in tablas:
+        for fila in tabla:
+            fila = [str(c).strip() if c else "" for c in fila]
+            for i, celda in enumerate(fila):
+                celda_clean = celda.replace("\n", " ").strip()
                 
-    return datos_extraidos
+                # Datos Estándar
+                if "Categoría" in celda and "SA/HA" in celda:
+                    if i + 1 < len(fila): info["Categoría"] = fila[i+1]
+                if "ID Sitio" in celda:
+                    if i + 1 < len(fila): info["ID Sitio"] = fila[i+1]
+                if "Fecha" in celda:
+                    if i + 1 < len(fila): info["Fecha"] = fila[i+1]
+                if "Responsable" in celda:
+                    if i + 1 < len(fila): info["Responsable"] = fila[i+1]
+                if "Coord. Central Norte" in celda:
+                    if i + 1 < len(fila): info["Coord. Norte"] = fila[i+1]
+                if "Coord. Central Este" in celda:
+                    if i + 1 < len(fila): info["Coord. Este"] = fila[i+1]
 
-# ==========================================
-#   NUEVA LÓGICA: GENERADOR FICHAS CON FOTO (V24 - CORREGIDA Y UNA LÍNEA)
-# ==========================================
+    # 2. INTENTO POR TEXTO (Respaldo Regex + Cronología + Descripción)
+    texto = pagina.extract_text()
+    if texto:
+        # A. RESPALDOS DE DATOS GENERALES (Por si la tabla falló)
+        if not info.get("ID Sitio"):
+            match = re.search(r"ID Sitio:?\s*([A-Za-z0-9\-]+)", texto, re.IGNORECASE)
+            if match: info["ID Sitio"] = match.group(1).strip()
+        
+        if not info.get("Fecha"):
+            match = re.search(r"Fecha:?\s*(\d{2}[-/]\d{2}[-/]\d{4})", texto)
+            if match: info["Fecha"] = match.group(1).strip()
+            
+        if not info.get("Responsable"):
+            match = re.search(r"Responsable:?\s*(.*?)(?:\n|$)", texto, re.IGNORECASE)
+            if match: info["Responsable"] = match.group(1).strip()
+            
+        if not info.get("Categoría"):
+            match = re.search(r"Categoría.*?(?:SA/HA)?:?\s*(HA|SA)", texto, re.IGNORECASE)
+            if match: info["Categoría"] = match.group(1).strip()
 
-def generar_fichas_con_foto(archivo_bytes):
+        if not info.get("Coord. Norte"):
+            match = re.search(r"Norte:?\s*(\d{6,8})", texto)
+            if match: info["Coord. Norte"] = match.group(1)
+        if not info.get("Coord. Este"):
+            match = re.search(r"Este:?\s*(\d{5,7})", texto)
+            if match: info["Coord. Este"] = match.group(1)
+
+        # B. DESCRIPCIÓN (Lógica de corte quirúrgico)
+        if not info.get("Descripción"):
+            patron = r"Descripción\s*\n*(.*?)(?=" + "|".join(palabras_fin) + r"|$)"
+            match = re.search(patron, texto, re.DOTALL | re.IGNORECASE)
+            if match:
+                contenido = match.group(1).strip()
+                # Verificar si es solo un título
+                es_titulo = False
+                for p in palabras_fin:
+                    if contenido.upper().startswith(p):
+                        es_titulo = True; break
+                if es_titulo: info["Descripción"] = ""
+                else:
+                    if contenido.startswith("Otro"): contenido = contenido.replace("Otro", "", 1).strip()
+                    info["Descripción"] = contenido
+
+        # C. CRONOLOGÍA (Lógica de escaneo de línea)
+        # Buscamos la línea que contenga la opción Y una "X"
+        lineas = texto.split('\n')
+        opciones_crono = ["Prehispánico", "Subactual", "Incierto", "Histórico"]
+        crono_encontrada = []
+
+        for linea in lineas:
+            linea_limpia = linea.strip()
+            # 1. Checkbox estándar
+            for op in opciones_crono:
+                # Si la línea tiene la palabra clave Y tiene una X (o x) separada
+                if op.lower() in linea_limpia.lower():
+                    # Verificamos la X
+                    # Puede ser "Prehispánico X" o "X Prehispánico" o en celdas separadas
+                    if "X" in linea_limpia.upper():
+                         crono_encontrada.append(op)
+            
+            # 2. Periodo Específico
+            if "Periodo específico" in linea_limpia:
+                # Capturar lo que venga después de los dos puntos
+                match_per = re.search(r"Periodo específico:?\s*(.*)", linea_limpia, re.IGNORECASE)
+                if match_per:
+                    contenido = match_per.group(1).strip()
+                    # Ignoramos si es solo una línea de subrayado
+                    if len(contenido) > 1 and "_" not in contenido:
+                        crono_encontrada.append(f"Periodo: {contenido}")
+
+        if crono_encontrada:
+            info["Cronología"] = ", ".join(list(set(crono_encontrada)))
+
+    return info
+
+def extraer_foto_mas_grande(pagina):
     """
-    Usa la MISMA lógica de extracción que el Excel (incluyendo Cronología).
-    Captura la 4ta foto.
+    Busca la imagen más grande de la página (evita logos pequeños).
     """
+    foto_bytes = None
+    imagenes_pagina = pagina.images
+    
+    candidatos = []
+    for img in imagenes_pagina:
+        w = float(img['width'])
+        h = float(img['height'])
+        area = w * h
+        # Filtro de tamaño mínimo (para ignorar iconos pequeños)
+        if w > 50 and h > 50:
+            candidatos.append((area, img))
+    
+    if candidatos:
+        # Ordenamos por área (la más grande primero)
+        candidatos.sort(key=lambda x: x[0], reverse=True)
+        mejor_img_data = candidatos[0][1] # La imagen más grande
+        
+        bbox = (mejor_img_data['x0'], mejor_img_data['top'], mejor_img_data['x1'], mejor_img_data['bottom'])
+        try:
+            cropped_page = pagina.crop(bbox)
+            img_obj = cropped_page.to_image(resolution=200)
+            buf = io.BytesIO()
+            img_obj.save(buf, format="JPEG")
+            foto_bytes = buf.getvalue()
+        except:
+            pass
+            
+    return foto_bytes
+
+def procesar_pdf_completo(archivo_bytes):
+    """Procesa el PDF para Excel y Word con Foto."""
     datos_completos = []
     
-    # 1. Usamos la lógica robusta del Extractor PDF (simulada aquí para capturar foto en el mismo bucle)
-    # Copiamos la lógica interna para no llamar a la función dos veces y perder la referencia a la página (necesaria para la foto)
-    
-    palabras_fin = ["CRONOLOGÍA", "OBSERVACIONES", "INTERPRETACIÓN", "REGISTRO", "BIBLIOGRAFÍA", "TIPOLOGÍA", "ASOCIACIÓN"]
-    opciones_crono = ["Prehispánico", "Subactual (post 1950)", "Incierto", "Histórico"]
-
     with pdfplumber.open(io.BytesIO(archivo_bytes)) as pdf:
         for pagina in pdf.pages:
-            info = {"Cronología": ""}
+            # 1. Extraer Datos (Texto)
+            info = extraer_datos_pdf_universal(pagina)
             
-            # --- DATOS (Lógica compartida) ---
-            tablas = pagina.extract_tables()
-            for tabla in tablas:
-                for fila in tabla:
-                    fila = [str(c).strip() if c else "" for c in fila]
-                    for i, celda in enumerate(fila):
-                        celda_clean = celda.replace("\n", " ").strip()
-                        # Campos básicos
-                        if "Categoría" in celda and "SA/HA" in celda:
-                            if i + 1 < len(fila): info["Categoría"] = fila[i+1]
-                        if "ID Sitio" in celda:
-                            if i + 1 < len(fila): info["ID Sitio"] = fila[i+1]
-                        if "Fecha" in celda:
-                            if i + 1 < len(fila): info["Fecha"] = fila[i+1]
-                        if "Responsable" in celda:
-                            if i + 1 < len(fila): info["Responsable"] = fila[i+1]
-                        if "Coord. Central Norte" in celda:
-                            if i + 1 < len(fila): info["Coord. Norte"] = fila[i+1]
-                        if "Coord. Central Este" in celda:
-                            if i + 1 < len(fila): info["Coord. Este"] = fila[i+1]
-                        
-                        # Cronología (X)
-                        for op in opciones_crono:
-                            if op in celda_clean:
-                                if i + 1 < len(fila):
-                                    if "X" in fila[i+1].upper(): info["Cronología"] = op
-                        if "Periodo específico" in celda_clean:
-                            if i + 1 < len(fila):
-                                val = fila[i+1].strip()
-                                if val and "X" not in val.upper(): info["Cronología"] = f"Periodo: {val}"
-
-            texto = pagina.extract_text()
-            if texto:
-                if not info.get("Descripción"):
-                    patron = r"Descripción\s*\n*(.*?)(?=" + "|".join(palabras_fin) + r"|$)"
-                    match = re.search(patron, texto, re.DOTALL | re.IGNORECASE)
-                    if match:
-                        contenido = match.group(1).strip()
-                        es_titulo = False
-                        for p in palabras_fin:
-                            if contenido.upper().startswith(p):
-                                es_titulo = True; break
-                        if es_titulo: info["Descripción"] = ""
-                        else:
-                            if contenido.startswith("Otro"): contenido = contenido.replace("Otro", "", 1).strip()
-                            info["Descripción"] = contenido
-                    else: info["Descripción"] = ""
-                
-                # Respaldos
-                if not info.get("ID Sitio"):
-                    match = re.search(r"ID Sitio:?\s*([A-Za-z0-9\-]+)", texto)
-                    if match: info["ID Sitio"] = match.group(1)
-                # ... (resto de respaldos implícitos por brevedad, funcionan igual)
-
-            # --- FOTO (La Cuarta imagen) ---
-            foto_bytes = None
-            imagenes_pagina = pagina.images
-            # Buscamos la 4ta imagen (index 3)
-            if len(imagenes_pagina) >= 4:
-                img_data = imagenes_pagina[3]
-                bbox = (img_data['x0'], img_data['top'], img_data['x1'], img_data['bottom'])
-                try:
-                    cropped_page = pagina.crop(bbox)
-                    img_obj = cropped_page.to_image(resolution=200)
-                    buf = io.BytesIO()
-                    img_obj.save(buf, format="JPEG")
-                    foto_bytes = buf.getvalue()
-                except: pass
+            # 2. Extraer Foto
+            info["foto_blob"] = extraer_foto_mas_grande(pagina)
             
-            # Guardamos
+            # Guardar si hay algo útil
             if info.get("ID Sitio") or info.get("Fecha"):
-                info["foto_blob"] = foto_bytes
                 datos_completos.append(info)
-
+                
     return datos_completos
 
 def crear_doc_tabla_horizontal(datos):
-    """
-    Crea un Word Horizontal.
-    Toda la información + Foto en UNA SOLA LÍNEA (Fila de tabla).
-    """
     doc = Document()
     
-    # Orientación Horizontal
     section = doc.sections[0]
     new_width, new_height = section.page_height, section.page_width
     section.orientation = WD_ORIENT.LANDSCAPE
     section.page_width = new_width
     section.page_height = new_height
-    section.left_margin = Cm(1.5)
-    section.right_margin = Cm(1.5)
+    section.left_margin = Cm(1.0)
+    section.right_margin = Cm(1.0)
 
     doc.add_heading("Fichas de Hallazgos (Resumen)", 0)
 
-    # Tabla única con encabezados
-    # Columnas: ID | Fecha | Resp | Cat | Desc | Cronología | Foto
+    # Tabla única
     tabla = doc.add_table(rows=1, cols=7)
     tabla.style = 'Table Grid'
     
     headers = tabla.rows[0].cells
-    headers[0].text = "ID Sitio"
-    headers[1].text = "Fecha"
-    headers[2].text = "Responsable"
-    headers[3].text = "Cat. (SA/HA)"
-    headers[4].text = "Descripción"
-    headers[5].text = "Cronología"
-    headers[6].text = "Foto Detalle"
-
-    for c in headers:
-        c.paragraphs[0].runs[0].bold = True
+    titulos = ["ID Sitio", "Fecha", "Responsable", "Cat. (SA/HA)", "Descripción", "Cronología", "Foto Detalle"]
+    
+    for i, t in enumerate(titulos):
+        headers[i].text = t
+        headers[i].paragraphs[0].runs[0].bold = True
 
     for item in datos:
         row = tabla.add_row().cells
@@ -433,16 +387,14 @@ def crear_doc_tabla_horizontal(datos):
         row[4].text = str(item.get("Descripción", ""))
         row[5].text = str(item.get("Cronología", ""))
         
-        # Insertar Foto en la última celda
         if item.get("foto_blob"):
             p = row[6].paragraphs[0]
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             try:
-                # Tamaño pequeño para que quepa en la fila
                 run = p.add_run()
-                run.add_picture(io.BytesIO(item["foto_blob"]), width=Cm(4.5)) 
+                run.add_picture(io.BytesIO(item["foto_blob"]), width=Cm(5.0)) 
             except:
-                p.add_run("[Err]")
+                p.add_run("[Error]")
         else:
             row[6].text = "[Sin Foto]"
 
@@ -480,13 +432,12 @@ def mostrar_pagina_pdf_excel():
     archivo_pdf = st.file_uploader("Subir PDF de Hallazgos (.pdf)", type="pdf", key="pdf_up")
     if archivo_pdf and st.button("Procesar PDF y Crear Excel"):
         with st.spinner("Escaneando PDF..."):
-            datos = extraer_datos_pdf(archivo_pdf.read())
+            datos = procesar_pdf_completo(archivo_pdf.read()) # Usamos la función universal
             if datos:
                 df = pd.DataFrame(datos)
-                # Orden solicitado + Cronología al final
                 orden = ["ID Sitio", "Coord. Norte", "Coord. Este", "Categoría", "Descripción", "Fecha", "Responsable", "Cronología"]
                 cols_finales = [c for c in orden if c in df.columns]
-                extras = [c for c in df.columns if c not in orden]
+                extras = [c for c in df.columns if c not in orden and c != "foto_blob"] # Excluir blob del excel
                 df_final = df[cols_finales + extras]
                 df_final = df_final.rename(columns={"Categoría": "Categoría (SA/HA)"})
                 
@@ -504,7 +455,7 @@ def mostrar_pagina_fichas_con_fotos():
     archivo_pdf = st.file_uploader("Subir PDF (.pdf)", type="pdf", key="pdf_foto_up")
     if archivo_pdf and st.button("Generar Word con Fotos"):
         with st.spinner("Procesando..."):
-            datos = generar_fichas_con_foto(archivo_pdf.read())
+            datos = procesar_pdf_completo(archivo_pdf.read())
             if datos:
                 st.success(f"✅ Se generaron {len(datos)} registros.")
                 doc_bytes = crear_doc_tabla_horizontal(datos)

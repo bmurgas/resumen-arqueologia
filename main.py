@@ -193,17 +193,10 @@ def generar_word_con_formato(datos):
     return buffer
 
 # ==========================================
-#   NUEVA LÓGICA: GENERADOR EXCEL DESDE WORD (V29)
+#   LÓGICA GENERADOR EXCEL DESDE WORD (INTACTA V29)
 # ==========================================
 
 def procesar_word_a_excel(archivo_bytes, nombre_archivo):
-    """
-    Lee archivos Word y extrae:
-    - Fecha
-    - Descripción de la actividad
-    - Descripción estratigráfica
-    Siempre buscando el dato en la celda de la DERECHA.
-    """
     try:
         doc = Document(io.BytesIO(archivo_bytes))
     except Exception as e:
@@ -212,60 +205,49 @@ def procesar_word_a_excel(archivo_bytes, nombre_archivo):
 
     registros = []
     
-    # Recorremos todas las tablas del Word
     for tabla in doc.tables:
         dato = {
             "Fecha": "",
             "Descripción de la actividad": "",
             "Descripción estratigráfica": ""
         }
-        encontrado = False # Para saber si esta tabla tenía algo útil
+        encontrado = False 
         
         for fila in tabla.rows:
-            # Recorremos celdas buscando los títulos clave
             for i, celda in enumerate(fila.cells):
                 texto_celda = celda.text.strip()
                 
-                # Limpieza básica para comparar (quitar acentos o mayúsculas si fuera necesario, 
-                # pero aquí usaremos búsqueda directa como pediste)
+                if "Fecha" in texto_celda and len(texto_celda) < 20:
+                    if i + 1 < len(fila.cells):
+                        dato["Fecha"] = fila.cells[i+1].text.strip()
+                        encontrado = True
                 
-                # 1. FECHA
-                if "Fecha" in texto_celda:
-                    # Validar que no sea un falso positivo (ej: texto largo que contiene fecha)
-                    # Generalmente el título es corto "Fecha:"
-                    if len(texto_celda) < 20: 
-                        if i + 1 < len(fila.cells):
-                            dato["Fecha"] = fila.cells[i+1].text.strip()
-                            encontrado = True
-                
-                # 2. ACTIVIDAD
                 if "Descripción de la actividad" in texto_celda:
                     if i + 1 < len(fila.cells):
                         dato["Descripción de la actividad"] = fila.cells[i+1].text.strip()
                         encontrado = True
 
-                # 3. ESTRATIGRAFÍA
                 if "Descripción estratigráfica" in texto_celda:
                     if i + 1 < len(fila.cells):
                         dato["Descripción estratigráfica"] = fila.cells[i+1].text.strip()
                         encontrado = True
 
         if encontrado:
-            # Solo agregamos si se extrajo al menos un dato relevante
             if dato["Fecha"] or dato["Descripción de la actividad"] or dato["Descripción estratigráfica"]:
                 registros.append(dato)
                 
     return registros
 
 # ==========================================
-#   LÓGICA UNIVERSAL DE EXTRACCIÓN PDF (V29)
+#   LÓGICA UNIVERSAL DE EXTRACCIÓN PDF (V30 - CORRECCIONES CRONOLOGÍA)
 # ==========================================
 
 def extraer_datos_pdf_universal(pagina):
     info = {"Cronología": ""}
     palabras_fin = ["CRONOLOGÍA", "OBSERVACIONES", "INTERPRETACIÓN", "REGISTRO", "BIBLIOGRAFÍA", "TIPOLOGÍA", "ASOCIACIÓN"]
-    # Palabras que queremos ELIMINAR si se cuelan en la cronología
-    palabras_basura = ["DESCRIPCIÓN DE LAS EVIDENCIAS", "DESCRIPCIÓN"] 
+    
+    # Palabras que queremos ELIMINAR si se cuelan (limpieza estricta)
+    palabras_basura = ["DESCRIPCIÓN DE LAS EVIDENCIAS", "DESCRIPCIÓN", "EVIDENCIAS"] 
     
     crono_partes = []
 
@@ -277,7 +259,7 @@ def extraer_datos_pdf_universal(pagina):
             for i, celda in enumerate(fila):
                 celda_clean = celda.replace("\n", " ").strip()
                 
-                # Categoría (SA/HA)
+                # Categoría (Misma celda o vecina)
                 if "Categoría" in celda:
                     if i + 1 < len(fila) and fila[i+1].strip():
                         info["Categoría"] = fila[i+1]
@@ -310,25 +292,40 @@ def extraer_datos_pdf_universal(pagina):
                     if contenido.startswith("Otro"): contenido = contenido.replace("Otro", "", 1).strip()
                     info["Descripción"] = contenido
 
-        # B. Cronología (Escáner de Texto Puro)
-        if re.search(r"Prehispánico.*?x", texto, re.IGNORECASE): crono_partes.append("Prehispánico")
-        if re.search(r"Subactual.*?x", texto, re.IGNORECASE): crono_partes.append("Subactual")
-        if re.search(r"Incierto.*?x", texto, re.IGNORECASE): crono_partes.append("Incierto")
-        if re.search(r"Histórico.*?x", texto, re.IGNORECASE): crono_partes.append("Histórico")
+        # B. Cronología (REGEX CON FRENO)
+        # Usamos (?:(?!(Subactual|Incierto|Histórico)).)*? para asegurar que NO nos saltamos otra opción
+        # Esto evita que Prehispánico detecte la X de Incierto.
         
-        # Periodo Específico (Con limpieza de basura)
+        # 1. Prehispánico
+        if re.search(r"Prehispánico(?:(?!(?:Subactual|Incierto|Histórico)).)*?x", texto, re.IGNORECASE | re.DOTALL):
+            crono_partes.append("Prehispánico")
+            
+        # 2. Subactual (post 1950)
+        if re.search(r"Subactual(?:(?!(?:Prehispánico|Incierto|Histórico)).)*?x", texto, re.IGNORECASE | re.DOTALL):
+            crono_partes.append("Subactual")
+            
+        # 3. Incierto
+        if re.search(r"Incierto(?:(?!(?:Prehispánico|Subactual|Histórico)).)*?x", texto, re.IGNORECASE | re.DOTALL):
+            crono_partes.append("Incierto")
+            
+        # 4. Histórico
+        if re.search(r"Histórico(?:(?!(?:Prehispánico|Subactual|Incierto)).)*?x", texto, re.IGNORECASE | re.DOTALL):
+            crono_partes.append("Histórico")
+        
+        # 5. Periodo Específico (Limpieza agresiva)
         match_periodo = re.search(r"Periodo específico:?\s*(.*?)(?:\n|$)", texto, re.IGNORECASE)
         if match_periodo:
             val = match_periodo.group(1).strip()
-            # Si el valor capturado contiene la basura, la cortamos
+            
+            # Cortar si aparece la basura
             for basura in palabras_basura:
                 if basura in val.upper():
-                    val = val.split(basura)[0].strip() # Cortar antes de la basura
-                    val = val.split(basura.title())[0].strip() # Intentar con Title Case también
+                    idx = val.upper().find(basura)
+                    val = val[:idx].strip()
             
-            # Ignorar si es solo X o guiones o vacío
-            if len(val) > 1 and "x" not in val.lower():
-                crono_partes.append(f"Periodo: {val}")
+            # Solo agregar si queda texto válido y no es una X
+            if len(val) > 1 and "x" != val.lower() and "x" != val.strip().lower():
+                crono_partes.append(val) # Sin prefijo "Periodo:"
         
         if crono_partes:
             info["Cronología"] = ", ".join(list(set(crono_partes)))
@@ -356,26 +353,21 @@ def extraer_datos_pdf_universal(pagina):
     return info
 
 # ==========================================
-#   LÓGICA FOTO (V28 - LA MÁS GRANDE)
+#   LÓGICA FOTO (V30 - PRIMERA FOTO SIMPLE)
 # ==========================================
 
-def extraer_foto_mas_grande(pagina):
+def extraer_primera_foto(pagina):
+    """
+    Toma la primera imagen disponible en la página (índice 0).
+    Modo prueba solicitado.
+    """
     foto_bytes = None
-    imagenes = pagina.images
-    candidatos = []
-    
-    for img in imagenes:
-        w = float(img['width'])
-        h = float(img['height'])
-        area = w * h
-        if w > 50 and h > 50:
-            candidatos.append((area, img))
-            
-    if candidatos:
-        candidatos.sort(key=lambda x: x[0], reverse=True)
-        mejor_img = candidatos[0][1]
-        bbox = (mejor_img['x0'], mejor_img['top'], mejor_img['x1'], mejor_img['bottom'])
+    if pagina.images:
         try:
+            # Tomamos la primera sin preguntar
+            img_data = pagina.images[0]
+            bbox = (img_data['x0'], img_data['top'], img_data['x1'], img_data['bottom'])
+            
             cropped = pagina.crop(bbox)
             img_obj = cropped.to_image(resolution=200)
             buf = io.BytesIO()
@@ -390,7 +382,7 @@ def procesar_pdf_completo(archivo_bytes):
     with pdfplumber.open(io.BytesIO(archivo_bytes)) as pdf:
         for pagina in pdf.pages:
             info = extraer_datos_pdf_universal(pagina)
-            info["foto_blob"] = extraer_foto_mas_grande(pagina)
+            info["foto_blob"] = extraer_primera_foto(pagina)
             if info.get("ID Sitio") or info.get("Fecha"):
                 datos_completos.append(info)
     return datos_completos

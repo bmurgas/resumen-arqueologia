@@ -191,115 +191,102 @@ def generar_word_con_formato(datos):
     return buffer
 
 # ==========================================
-#      LÓGICA EXTRACTOR PDF (CORREGIDA V21 - EL FILTRO INTELIGENTE)
+#      LÓGICA EXTRACTOR PDF (V22 - CORREGIDA Y REORDENADA)
 # ==========================================
-
-def limpiar_descripcion(texto_sucio):
-    """
-    Función 'Portero': Analiza si el texto capturado es realmente una descripción
-    o si capturamos el título de la siguiente sección por error.
-    """
-    if not texto_sucio:
-        return ""
-    
-    texto_sucio = texto_sucio.strip()
-    
-    # Palabras que indican el inicio de la SIGUIENTE sección.
-    # Si el texto empieza con esto, significa que NO había descripción.
-    palabras_prohibidas = [
-        "CRONOLOGÍA", "OBSERVACIONES", "INTERPRETACIÓN", 
-        "REGISTRO", "BIBLIOGRAFÍA", "TIPOLOGÍA"
-    ]
-    
-    # Verificamos si lo que capturamos empieza DIRECTAMENTE con una palabra prohibida
-    for palabra in palabras_prohibidas:
-        if texto_sucio.upper().startswith(palabra):
-            return "" # Era el título, así que la descripción es vacía.
-            
-    # Limpieza extra: A veces queda un "Otro" colgado de la tabla anterior
-    if texto_sucio.startswith("Otro"):
-        texto_sucio = texto_sucio.replace("Otro", "", 1).strip()
-
-    return texto_sucio
 
 def extraer_datos_pdf(archivo_bytes):
     datos_extraidos = []
+    
+    # Palabras clave que indican el FIN de la descripción
+    palabras_fin = ["CRONOLOGÍA", "OBSERVACIONES", "INTERPRETACIÓN", "REGISTRO", "BIBLIOGRAFÍA", "TIPOLOGÍA", "ASOCIACIÓN"]
     
     with pdfplumber.open(io.BytesIO(archivo_bytes)) as pdf:
         for pagina in pdf.pages:
             info = {}
             
-            # --- 1. INTENTO POR TABLAS (Prioritario para celda de al lado) ---
+            # 1. BÚSQUEDA EN TABLAS (Ideal para datos estructurados)
             tablas = pagina.extract_tables()
             for tabla in tablas:
                 for fila in tabla:
-                    fila_segura = [str(c).strip() if c else "" for c in fila]
-                    
-                    for i, celda in enumerate(fila_segura):
+                    fila = [str(c).strip() if c else "" for c in fila]
+                    for i, celda in enumerate(fila):
                         # Categoría
                         if "Categoría" in celda and "SA/HA" in celda:
-                            if i + 1 < len(fila_segura) and fila_segura[i+1]:
-                                info["Categoría"] = fila_segura[i+1]
-
-                        # Descripción en TABLA
-                        if celda == "Descripción" or ("Descripción" in celda and "actividad" not in celda.lower()):
-                            if i + 1 < len(fila_segura):
-                                desc_tabla = fila_segura[i+1]
-                                # Aplicamos el filtro también aquí por si acaso
-                                info["Descripción"] = limpiar_descripcion(desc_tabla)
-
-                        # Otros campos
+                            if i + 1 < len(fila): info["Categoría"] = fila[i+1]
+                        
+                        # ID Sitio
                         if "ID Sitio" in celda:
-                            if i + 1 < len(fila_segura) and fila_segura[i+1]: info["ID Sitio"] = fila_segura[i+1]
+                            if i + 1 < len(fila): info["ID Sitio"] = fila[i+1]
+                        
+                        # Fecha
                         if "Fecha" in celda:
-                            if i + 1 < len(fila_segura) and fila_segura[i+1]: info["Fecha"] = fila_segura[i+1]
+                            if i + 1 < len(fila): info["Fecha"] = fila[i+1]
+                            
+                        # Responsable
                         if "Responsable" in celda:
-                            if i + 1 < len(fila_segura) and fila_segura[i+1]: info["Responsable"] = fila_segura[i+1]
+                            if i + 1 < len(fila): info["Responsable"] = fila[i+1]
+                        
+                        # Coordenadas
                         if "Coord. Central Norte" in celda:
-                            if i + 1 < len(fila_segura): info["Coord. Norte"] = fila_segura[i+1]
+                            if i + 1 < len(fila): info["Coord. Norte"] = fila[i+1]
                         if "Coord. Central Este" in celda:
-                            if i + 1 < len(fila_segura): info["Coord. Este"] = fila_segura[i+1]
+                            if i + 1 < len(fila): info["Coord. Este"] = fila[i+1]
 
-            # --- 2. INTENTO POR TEXTO (Respaldo inteligente) ---
+            # 2. BÚSQUEDA EN TEXTO (Crucial para Descripción y Respaldos)
             texto = pagina.extract_text()
             if texto:
-                # Descripción: Regex que captura hasta la siguiente sección
-                if "Descripción" not in info or not info["Descripción"]:
-                    # Busca "Descripción", salta líneas opcionales, captura todo (.*?) 
-                    # hasta que se encuentre con CRONOLOGIA, OBSERVACIONES, etc.
-                    palabras_cierre = r"(?:CRONOLOGÍA|OBSERVACIONES|INTERPRETACIÓN|REGISTRO|BIBLIOGRAFÍA|OBSERVACIÓN|TIPOLOGÍA)"
-                    patron_desc = r"Descripción\s*\n+(.*?)(?=\n\s*" + palabras_cierre + r"|$)"
+                # --- LÓGICA DE DESCRIPCIÓN (CORTE QUIRÚRGICO) ---
+                if not info.get("Descripción"):
+                    # Regex: Busca "Descripción" y captura TODO hasta el final o próxima palabra clave
+                    # Usamos re.DOTALL para que (.) incluya saltos de línea
+                    patron = r"Descripción\s*\n*(.*?)(?=" + "|".join(palabras_fin) + r"|$)"
+                    match = re.search(patron, texto, re.DOTALL | re.IGNORECASE)
                     
-                    match_desc = re.search(patron_desc, texto, re.DOTALL | re.IGNORECASE)
-                    
-                    if match_desc:
-                        raw_text = match_desc.group(1)
-                        # AQUÍ LA MAGIA: Limpiamos y verificamos si es solo el título siguiente
-                        info["Descripción"] = limpiar_descripcion(raw_text)
+                    if match:
+                        contenido = match.group(1).strip()
+                        
+                        # LIMPIEZA: Si el contenido capturado ES una de las palabras fin (porque el regex fue codicioso), bórralo.
+                        es_titulo = False
+                        for p in palabras_fin:
+                            if contenido.upper().startswith(p):
+                                es_titulo = True
+                                break
+                        
+                        if es_titulo:
+                            info["Descripción"] = ""
+                        else:
+                            # Si empieza con "Otro", lo limpiamos
+                            if contenido.startswith("Otro"):
+                                contenido = contenido.replace("Otro", "", 1).strip()
+                            info["Descripción"] = contenido
                     else:
                         info["Descripción"] = ""
 
-                # Respaldos Regex estándar
-                if not info.get("Categoría"):
-                    match = re.search(r"Categoría.*?:\s*(.*?)(?:\n|Responsable|ID|$)", texto)
-                    if match: info["Categoría"] = match.group(1).strip()
+                # --- RESPALDOS DE OTROS DATOS ---
                 if not info.get("ID Sitio"):
                     match = re.search(r"ID Sitio:?\s*([A-Za-z0-9\-]+)", texto)
                     if match: info["ID Sitio"] = match.group(1)
+                
                 if not info.get("Fecha"):
                     match = re.search(r"Fecha:?\s*(\d{2}[-/]\d{2}[-/]\d{4})", texto)
                     if match: info["Fecha"] = match.group(1)
-                if not info.get("Responsable"):
-                    match_resp = re.search(r"Responsable:?\s*(.*?)(?:\n|$)", texto)
-                    if match_resp: info["Responsable"] = match_resp.group(1).strip()
-                if not info.get("Coord. Norte"):
-                    match_n = re.search(r"Norte:?\s*(\d{6,8})", texto)
-                    if match_n: info["Coord. Norte"] = match_n.group(1)
-                if not info.get("Coord. Este"):
-                    match_e = re.search(r"Este:?\s*(\d{5,7})", texto)
-                    if match_e: info["Coord. Este"] = match_e.group(1)
 
-            # Guardar si hay datos mínimos
+                if not info.get("Categoría"):
+                    match = re.search(r"Categoría.*?:\s*(.*?)(?:\n|Responsable|ID|$)", texto)
+                    if match: info["Categoría"] = match.group(1).strip()
+
+                if not info.get("Coord. Norte"):
+                    match = re.search(r"Norte:?\s*(\d{6,8})", texto)
+                    if match: info["Coord. Norte"] = match.group(1)
+
+                if not info.get("Coord. Este"):
+                    match = re.search(r"Este:?\s*(\d{5,7})", texto)
+                    if match: info["Coord. Este"] = match.group(1)
+
+                if not info.get("Responsable"):
+                    match = re.search(r"Responsable:?\s*(.*?)(?:\n|$)", texto)
+                    if match: info["Responsable"] = match.group(1).strip()
+
             if info.get("ID Sitio") or info.get("Fecha"):
                 datos_extraidos.append(info)
                 
@@ -334,7 +321,7 @@ def mostrar_pagina_word():
 
 def mostrar_pagina_pdf():
     st.title("Extractor de Fichas PDF a Excel")
-    st.markdown("Extrae datos de fichas de hallazgo (Tablas o Texto).")
+    st.markdown("Extrae datos de fichas de hallazgo.")
     
     archivo_pdf = st.file_uploader("Subir PDF de Hallazgos (.pdf)", type="pdf", key="pdf_up")
     
@@ -344,17 +331,35 @@ def mostrar_pagina_pdf():
             
             if datos:
                 df = pd.DataFrame(datos)
-                cols_deseadas = ["ID Sitio", "Fecha", "Categoría", "Descripción", "Responsable", "Coord. Norte", "Coord. Este"]
-                cols_finales = [c for c in cols_deseadas if c in df.columns]
-                extras = [c for c in df.columns if c not in cols_deseadas]
-                df = df[cols_finales + extras]
                 
-                st.success(f"✅ Se extrajeron {len(df)} fichas.")
-                st.dataframe(df) 
+                # --- REORDENAMIENTO DE COLUMNAS (LO QUE PEDISTE) ---
+                # Definimos el orden exacto
+                orden_columnas = [
+                    "ID Sitio",
+                    "Coord. Norte",
+                    "Coord. Este",
+                    "Categoría",
+                    "Descripción",
+                    "Fecha",
+                    "Responsable"
+                ]
+                
+                # Seleccionamos solo las que existen para no dar error
+                cols_finales = [c for c in orden_columnas if c in df.columns]
+                # Agregamos extras si las hubiera (por seguridad)
+                extras = [c for c in df.columns if c not in orden_columnas]
+                
+                df_final = df[cols_finales + extras]
+
+                # Renombramos la columna Categoría para que sea EXACTA a tu pedido
+                df_final = df_final.rename(columns={"Categoría": "Categoría (SA/HA)"})
+                
+                st.success(f"✅ Se extrajeron {len(df_final)} fichas.")
+                st.dataframe(df_final) 
                 
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    df.to_excel(writer, index=False, sheet_name="Hallazgos")
+                    df_final.to_excel(writer, index=False, sheet_name="Hallazgos")
                 
                 st.download_button(
                     label="⬇️ Descargar Planilla Excel",
@@ -363,7 +368,7 @@ def mostrar_pagina_pdf():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
-                st.error("No se encontraron datos. El PDF podría ser una imagen escaneada (sin texto seleccionable).")
+                st.error("No se encontraron datos.")
 
 # ==========================================
 #        MENÚ LATERAL

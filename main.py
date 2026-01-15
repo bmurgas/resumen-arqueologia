@@ -193,17 +193,15 @@ def generar_word_con_formato(datos):
     return buffer
 
 # ==========================================
-#   LÓGICA UNIVERSAL DE EXTRACCIÓN PDF (V26 - CRONOLOGÍA CORREGIDA)
+#   LÓGICA UNIVERSAL DE EXTRACCIÓN PDF (V26)
 # ==========================================
 
 def extraer_datos_pdf_universal(pagina):
     info = {"Cronología": ""}
     palabras_fin = ["CRONOLOGÍA", "OBSERVACIONES", "INTERPRETACIÓN", "REGISTRO", "BIBLIOGRAFÍA", "TIPOLOGÍA", "ASOCIACIÓN"]
-    
-    # Lista para acumular los hallazgos de cronología
     crono_partes = []
 
-    # 1. BÚSQUEDA EN TABLAS (La forma más segura para Prehispánico/Periodo)
+    # 1. BÚSQUEDA EN TABLAS (Lo más robusto para celdas separadas)
     tablas = pagina.extract_tables()
     for tabla in tablas:
         for fila in tabla:
@@ -212,8 +210,17 @@ def extraer_datos_pdf_universal(pagina):
                 celda_clean = celda.replace("\n", " ").strip()
                 
                 # --- A. DATOS GENERALES ---
-                if "Categoría" in celda and "SA/HA" in celda:
-                    if i + 1 < len(fila): info["Categoría"] = fila[i+1]
+                # Categoría: Miramos celda vecina Y también dentro de la misma celda
+                if "Categoría" in celda:
+                    # Intento 1: Celda vecina
+                    if i + 1 < len(fila) and fila[i+1]:
+                        info["Categoría"] = fila[i+1]
+                    # Intento 2: Misma celda (por si el borde no se detectó)
+                    else:
+                        match_in_cell = re.search(r"(?:SA|HA)", celda_clean)
+                        if match_in_cell:
+                             info["Categoría"] = match_in_cell.group(0)
+
                 if "ID Sitio" in celda:
                     if i + 1 < len(fila): info["ID Sitio"] = fila[i+1]
                 if "Fecha" in celda:
@@ -225,26 +232,26 @@ def extraer_datos_pdf_universal(pagina):
                 if "Coord. Central Este" in celda:
                     if i + 1 < len(fila): info["Coord. Este"] = fila[i+1]
 
-                # --- B. CRONOLOGÍA (Detección de X en tabla) ---
-                # Buscamos las opciones clave
-                if "Prehispánico" in celda_clean:
-                    if i + 1 < len(fila) and "X" in fila[i+1].upper(): crono_partes.append("Prehispánico")
-                if "Subactual" in celda_clean:
-                    if i + 1 < len(fila) and "X" in fila[i+1].upper(): crono_partes.append("Subactual")
-                if "Incierto" in celda_clean:
-                    if i + 1 < len(fila) and "X" in fila[i+1].upper(): crono_partes.append("Incierto")
-                if "Histórico" in celda_clean:
-                    if i + 1 < len(fila) and "X" in fila[i+1].upper(): crono_partes.append("Histórico")
+                # --- B. CRONOLOGÍA (La X está a la DERECHA de la opción) ---
+                # Buscamos la opción en la celda ACTUAL (izq) y la X en la SIGUIENTE (der)
                 
-                # Caso Periodo Específico (Tomar el texto de la celda siguiente)
+                opciones = ["Prehispánico", "Subactual", "Incierto", "Histórico"]
+                for op in opciones:
+                    if op in celda_clean:
+                        # Verificamos celda derecha
+                        if i + 1 < len(fila):
+                            vecino = fila[i+1].upper().strip()
+                            if "X" in vecino:
+                                crono_partes.append(op)
+                
+                # Periodo específico: Texto en la celda derecha
                 if "Periodo específico" in celda_clean:
                     if i + 1 < len(fila):
                         val = fila[i+1].strip()
-                        # Solo agregamos si hay texto y NO es una X (para evitar falsos positivos)
-                        if val and val.upper() != "X":
+                        if val and "X" not in val.upper():
                             crono_partes.append(val)
 
-    # 2. BÚSQUEDA EN TEXTO (Para Descripción y Respaldos)
+    # 2. BÚSQUEDA EN TEXTO (Respaldo si las tablas fallan)
     texto = pagina.extract_text()
     if texto:
         # Descripción: Corte quirúrgico
@@ -262,16 +269,20 @@ def extraer_datos_pdf_universal(pagina):
                     if contenido.startswith("Otro"): contenido = contenido.replace("Otro", "", 1).strip()
                     info["Descripción"] = contenido
 
-        # Respaldos de datos
+        # Respaldos de datos (ID, Fecha, etc.)
         if not info.get("ID Sitio"):
             match = re.search(r"ID Sitio:?\s*([A-Za-z0-9\-]+)", texto, re.IGNORECASE)
             if match: info["ID Sitio"] = match.group(1).strip()
         if not info.get("Fecha"):
             match = re.search(r"Fecha:?\s*(\d{2}[-/]\d{2}[-/]\d{4})", texto)
             if match: info["Fecha"] = match.group(1).strip()
+        
+        # Respaldo Categoría (Regex más agresivo)
         if not info.get("Categoría"):
-            match = re.search(r"Categoría.*?(?:SA/HA)?:?\s*(HA|SA)", texto, re.IGNORECASE)
+            # Busca SA o HA aislados o después de dos puntos
+            match = re.search(r"(?:Categoría.*?)?\b(HA|SA)\b", texto)
             if match: info["Categoría"] = match.group(1).strip()
+            
         if not info.get("Coord. Norte"):
             match = re.search(r"Norte:?\s*(\d{6,8})", texto)
             if match: info["Coord. Norte"] = match.group(1)
@@ -282,94 +293,58 @@ def extraer_datos_pdf_universal(pagina):
             match = re.search(r"Responsable:?\s*(.*?)(?:\n|$)", texto, re.IGNORECASE)
             if match: info["Responsable"] = match.group(1).strip()
 
-    # Construir string final de Cronología
     if crono_partes:
-        # Unimos todo en un solo string (Ej: "Prehispánico Posiblemente Alfarero Tardío")
-        info["Cronología"] = " ".join(crono_partes)
+        info["Cronología"] = ", ".join(list(set(crono_partes)))
     
     return info
 
 # ==========================================
-#   LÓGICA FOTO DETALLE (V26 - ANCLADA A TEXTO)
+#   LÓGICA FOTO DETALLE (V26 - TOLERANCIA AMPLIADA)
 # ==========================================
 
 def extraer_foto_por_etiqueta(pagina):
     """
-    Busca la palabra 'Fotografía detalle' y recorta la imagen que está
-    INMEDIATAMENTE ARRIBA de ese texto.
+    Busca 'Fotografía detalle' y la imagen INMEDIATAMENTE ARRIBA.
+    Tolerancia vertical aumentada para detectar fotos con margen blanco.
     """
     foto_bytes = None
     
-    # 1. Encontrar la etiqueta "Fotografía detalle"
     words = pagina.extract_words()
     label_bbox = None
     
-    # Buscamos la secuencia de palabras
+    # 1. Encontrar etiqueta "Fotografía detalle"
     for i in range(len(words) - 1):
         w1 = words[i]
         w2 = words[i+1]
         if "Fotografía" in w1['text'] and "detalle" in w2['text']:
-            # Creamos un bounding box que cubra ambas palabras
             label_bbox = {
                 'top': min(w1['top'], w2['top']),
                 'bottom': max(w1['bottom'], w2['bottom']),
-                'x0': w1['x0'],
-                'x1': w2['x1']
+                'x0': w1['x0'], 'x1': w2['x1']
             }
             break
     
-    # 2. Si encontramos la etiqueta, buscamos la imagen encima
+    # 2. Buscar imagen encima
     if label_bbox:
         candidates = []
         for img in pagina.images:
-            # La imagen debe estar ARRIBA del texto (img['bottom'] <= label_bbox['top'])
-            # Damos un margen de tolerancia vertical de 20px
-            if img['bottom'] <= label_bbox['top'] + 20:
-                # Y debe estar alineada horizontalmente (aprox)
-                # Centro de la imagen
+            # Debe estar ARRIBA (bottom < top etiqueta)
+            # Aumentamos tolerancia a 100 puntos (antes era 20) por si hay mucho espacio blanco
+            distancia_vertical = label_bbox['top'] - img['bottom']
+            
+            if 0 <= distancia_vertical < 100: 
+                # Alineación Horizontal (centros cercanos)
                 img_cx = (img['x0'] + img['x1']) / 2
                 label_cx = (label_bbox['x0'] + label_bbox['x1']) / 2
                 
-                # Si los centros están relativamente cerca (dentro de 150px)
                 if abs(img_cx - label_cx) < 150:
-                    distancia = label_bbox['top'] - img['bottom']
-                    candidates.append((distancia, img))
+                    candidates.append((distancia_vertical, img))
         
         if candidates:
-            # Tomamos la imagen que esté visualmente más cerca del texto (menor distancia)
-            candidates.sort(key=lambda x: x[0]) # Ordenar por distancia ascendente
+            # La más cercana verticalmente
+            candidates.sort(key=lambda x: x[0])
             mejor_img = candidates[0][1]
             
-            # Recortar
-            bbox = (mejor_img['x0'], mejor_img['top'], mejor_img['x1'], mejor_img['bottom'])
-            try:
-                cropped = pagina.crop(bbox)
-                img_obj = cropped.to_image(resolution=200)
-                buf = io.BytesIO()
-                img_obj.save(buf, format="JPEG")
-                foto_bytes = buf.getvalue()
-            except:
-                pass
-    
-    # 3. FALLBACK: Si no funcionó la etiqueta, intentamos buscar la imagen en el cuadrante inferior derecho
-    if not foto_bytes:
-        w = pagina.width
-        h = pagina.height
-        candidates = []
-        for img in pagina.images:
-            # Centro de la imagen
-            cx = (img['x0'] + img['x1']) / 2
-            cy = (img['top'] + img['bottom']) / 2
-            
-            # Si está en la mitad derecha y mitad inferior
-            if cx > w/2 and cy > h/2:
-                # Filtro de tamaño (ignorar iconos)
-                if float(img['width']) > 50:
-                    candidates.append(img)
-        
-        if candidates:
-            # Tomamos la última (orden de lectura usual)
-            mejor_img = candidates[-1]
             bbox = (mejor_img['x0'], mejor_img['top'], mejor_img['x1'], mejor_img['bottom'])
             try:
                 cropped = pagina.crop(bbox)
@@ -378,7 +353,7 @@ def extraer_foto_por_etiqueta(pagina):
                 img_obj.save(buf, format="JPEG")
                 foto_bytes = buf.getvalue()
             except: pass
-
+            
     return foto_bytes
 
 def procesar_pdf_completo(archivo_bytes):
@@ -386,9 +361,7 @@ def procesar_pdf_completo(archivo_bytes):
     
     with pdfplumber.open(io.BytesIO(archivo_bytes)) as pdf:
         for pagina in pdf.pages:
-            # 1. Datos
             info = extraer_datos_pdf_universal(pagina)
-            # 2. Foto
             info["foto_blob"] = extraer_foto_por_etiqueta(pagina)
             
             if info.get("ID Sitio") or info.get("Fecha"):
@@ -409,17 +382,11 @@ def crear_doc_tabla_horizontal(datos):
 
     doc.add_heading("Fichas de Hallazgos (Resumen)", 0)
 
-    # Tabla única
-    tabla = doc.add_table(rows=1, cols=8) # 8 Columnas ahora
-    tabla.style = 'Table Grid'
-    
-    # Encabezados en el orden solicitado
-    titulos = ["ID Sitio", "Coord. Norte", "Coord. Este", "Cat. (SA/HA)", "Descripción", "Fecha", "Responsable", "Cronología", "Foto Detalle"]
-    # Nota: Puse 8 cols en add_table, pero titulos son 9... error mío. Ajustamos a 9 cols.
-    
-    # Corrigiendo tabla a 9 columnas
+    # 9 Columnas totales
     tabla = doc.add_table(rows=1, cols=9)
     tabla.style = 'Table Grid'
+    
+    titulos = ["ID Sitio", "Coord. Norte", "Coord. Este", "Cat. (SA/HA)", "Descripción", "Fecha", "Responsable", "Cronología", "Foto Detalle"]
     
     headers = tabla.rows[0].cells
     for i, t in enumerate(titulos):
@@ -438,7 +405,7 @@ def crear_doc_tabla_horizontal(datos):
         row[6].text = str(item.get("Responsable", ""))
         row[7].text = str(item.get("Cronología", ""))
         
-        # Foto en columna 8 (índice 8)
+        # Foto al final
         if item.get("foto_blob"):
             p = row[8].paragraphs[0]
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -487,7 +454,7 @@ def mostrar_pagina_pdf_excel():
             datos = procesar_pdf_completo(archivo_pdf.read())
             if datos:
                 df = pd.DataFrame(datos)
-                # Orden ID | Norte | Este | Cat | Desc | Fecha | Resp | Crono
+                # Orden estricto
                 orden = ["ID Sitio", "Coord. Norte", "Coord. Este", "Categoría", "Descripción", "Fecha", "Responsable", "Cronología"]
                 cols_finales = [c for c in orden if c in df.columns]
                 extras = [c for c in df.columns if c not in orden and c != "foto_blob"]
@@ -504,7 +471,7 @@ def mostrar_pagina_pdf_excel():
 
 def mostrar_pagina_fichas_con_fotos():
     st.title("Generador de Fichas Word con Foto")
-    st.markdown("Tabla horizontal con datos + Foto detalle (Detectada por etiqueta).")
+    st.markdown("Tabla horizontal con datos + Foto detalle.")
     archivo_pdf = st.file_uploader("Subir PDF (.pdf)", type="pdf", key="pdf_foto_up")
     if archivo_pdf and st.button("Generar Word con Fotos"):
         with st.spinner("Procesando..."):

@@ -191,8 +191,36 @@ def generar_word_con_formato(datos):
     return buffer
 
 # ==========================================
-#      LÓGICA EXTRACTOR PDF (CORREGIDA V20)
+#      LÓGICA EXTRACTOR PDF (CORREGIDA V21 - EL FILTRO INTELIGENTE)
 # ==========================================
+
+def limpiar_descripcion(texto_sucio):
+    """
+    Función 'Portero': Analiza si el texto capturado es realmente una descripción
+    o si capturamos el título de la siguiente sección por error.
+    """
+    if not texto_sucio:
+        return ""
+    
+    texto_sucio = texto_sucio.strip()
+    
+    # Palabras que indican el inicio de la SIGUIENTE sección.
+    # Si el texto empieza con esto, significa que NO había descripción.
+    palabras_prohibidas = [
+        "CRONOLOGÍA", "OBSERVACIONES", "INTERPRETACIÓN", 
+        "REGISTRO", "BIBLIOGRAFÍA", "TIPOLOGÍA"
+    ]
+    
+    # Verificamos si lo que capturamos empieza DIRECTAMENTE con una palabra prohibida
+    for palabra in palabras_prohibidas:
+        if texto_sucio.upper().startswith(palabra):
+            return "" # Era el título, así que la descripción es vacía.
+            
+    # Limpieza extra: A veces queda un "Otro" colgado de la tabla anterior
+    if texto_sucio.startswith("Otro"):
+        texto_sucio = texto_sucio.replace("Otro", "", 1).strip()
+
+    return texto_sucio
 
 def extraer_datos_pdf(archivo_bytes):
     datos_extraidos = []
@@ -201,79 +229,75 @@ def extraer_datos_pdf(archivo_bytes):
         for pagina in pdf.pages:
             info = {}
             
-            # --- 1. INTENTO POR TABLAS (Prioritario) ---
+            # --- 1. INTENTO POR TABLAS (Prioritario para celda de al lado) ---
             tablas = pagina.extract_tables()
             for tabla in tablas:
                 for fila in tabla:
                     fila_segura = [str(c).strip() if c else "" for c in fila]
                     
                     for i, celda in enumerate(fila_segura):
-                        # Categoría (Buscar celda derecha)
+                        # Categoría
                         if "Categoría" in celda and "SA/HA" in celda:
                             if i + 1 < len(fila_segura) and fila_segura[i+1]:
                                 info["Categoría"] = fila_segura[i+1]
 
-                        # ID, Fecha, Responsable, Coordenadas...
+                        # Descripción en TABLA
+                        if celda == "Descripción" or ("Descripción" in celda and "actividad" not in celda.lower()):
+                            if i + 1 < len(fila_segura):
+                                desc_tabla = fila_segura[i+1]
+                                # Aplicamos el filtro también aquí por si acaso
+                                info["Descripción"] = limpiar_descripcion(desc_tabla)
+
+                        # Otros campos
                         if "ID Sitio" in celda:
-                            if i + 1 < len(fila_segura) and fila_segura[i+1]:
-                                info["ID Sitio"] = fila_segura[i+1]
+                            if i + 1 < len(fila_segura) and fila_segura[i+1]: info["ID Sitio"] = fila_segura[i+1]
                         if "Fecha" in celda:
-                            if i + 1 < len(fila_segura) and fila_segura[i+1]:
-                                info["Fecha"] = fila_segura[i+1]
+                            if i + 1 < len(fila_segura) and fila_segura[i+1]: info["Fecha"] = fila_segura[i+1]
                         if "Responsable" in celda:
-                            if i + 1 < len(fila_segura) and fila_segura[i+1]:
-                                info["Responsable"] = fila_segura[i+1]
+                            if i + 1 < len(fila_segura) and fila_segura[i+1]: info["Responsable"] = fila_segura[i+1]
                         if "Coord. Central Norte" in celda:
                             if i + 1 < len(fila_segura): info["Coord. Norte"] = fila_segura[i+1]
                         if "Coord. Central Este" in celda:
                             if i + 1 < len(fila_segura): info["Coord. Este"] = fila_segura[i+1]
 
-            # --- 2. INTENTO POR TEXTO (Con manejo de vacíos) ---
+            # --- 2. INTENTO POR TEXTO (Respaldo inteligente) ---
             texto = pagina.extract_text()
             if texto:
-                # Descripción: Busca el espacio entre "Descripción" y las palabras clave de cierre.
-                if not info.get("Descripción"):
-                    # Patrón: Busca "Descripción" + saltos de linea + CONTENIDO + (Cierre o Fin)
-                    # Si no hay CONTENIDO, el grupo (.*?) será vacío.
+                # Descripción: Regex que captura hasta la siguiente sección
+                if "Descripción" not in info or not info["Descripción"]:
+                    # Busca "Descripción", salta líneas opcionales, captura todo (.*?) 
+                    # hasta que se encuentre con CRONOLOGIA, OBSERVACIONES, etc.
                     palabras_cierre = r"(?:CRONOLOGÍA|OBSERVACIONES|INTERPRETACIÓN|REGISTRO|BIBLIOGRAFÍA|OBSERVACIÓN|TIPOLOGÍA)"
                     patron_desc = r"Descripción\s*\n+(.*?)(?=\n\s*" + palabras_cierre + r"|$)"
                     
                     match_desc = re.search(patron_desc, texto, re.DOTALL | re.IGNORECASE)
                     
                     if match_desc:
-                        contenido = match_desc.group(1).strip()
-                        # Limpieza de "Otro" residual de la tabla anterior
-                        if contenido.startswith("Otro"):
-                            contenido = contenido.replace("Otro", "", 1).strip()
-                        
-                        info["Descripción"] = contenido # Si estaba vacío, queda ""
+                        raw_text = match_desc.group(1)
+                        # AQUÍ LA MAGIA: Limpiamos y verificamos si es solo el título siguiente
+                        info["Descripción"] = limpiar_descripcion(raw_text)
                     else:
                         info["Descripción"] = ""
 
-                # Respaldos de otros campos si fallaron las tablas
+                # Respaldos Regex estándar
                 if not info.get("Categoría"):
                     match = re.search(r"Categoría.*?:\s*(.*?)(?:\n|Responsable|ID|$)", texto)
                     if match: info["Categoría"] = match.group(1).strip()
-
                 if not info.get("ID Sitio"):
                     match = re.search(r"ID Sitio:?\s*([A-Za-z0-9\-]+)", texto)
                     if match: info["ID Sitio"] = match.group(1)
-                
                 if not info.get("Fecha"):
                     match = re.search(r"Fecha:?\s*(\d{2}[-/]\d{2}[-/]\d{4})", texto)
                     if match: info["Fecha"] = match.group(1)
-
-                if not info.get("Coord. Norte"):
-                    match_n = re.search(r"Norte:?\s*(\d{6,8})", texto)
-                    if match_n: info["Coord. Norte"] = match_n.group(1)
-                
-                if not info.get("Coord. Este"):
-                    match_e = re.search(r"Este:?\s*(\d{5,7})", texto)
-                    if match_e: info["Coord. Este"] = match_e.group(1)
-                
                 if not info.get("Responsable"):
                     match_resp = re.search(r"Responsable:?\s*(.*?)(?:\n|$)", texto)
                     if match_resp: info["Responsable"] = match_resp.group(1).strip()
+                if not info.get("Coord. Norte"):
+                    match_n = re.search(r"Norte:?\s*(\d{6,8})", texto)
+                    if match_n: info["Coord. Norte"] = match_n.group(1)
+                if not info.get("Coord. Este"):
+                    match_e = re.search(r"Este:?\s*(\d{5,7})", texto)
+                    if match_e: info["Coord. Este"] = match_e.group(1)
 
             # Guardar si hay datos mínimos
             if info.get("ID Sitio") or info.get("Fecha"):

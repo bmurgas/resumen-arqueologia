@@ -193,15 +193,14 @@ def generar_word_con_formato(datos):
     return buffer
 
 # ==========================================
-#   LÓGICA UNIVERSAL DE EXTRACCIÓN PDF (V27)
+#   LÓGICA UNIVERSAL DE EXTRACCIÓN PDF (V28)
 # ==========================================
 
 def extraer_datos_pdf_universal(pagina):
     info = {"Cronología": ""}
     palabras_fin = ["CRONOLOGÍA", "OBSERVACIONES", "INTERPRETACIÓN", "REGISTRO", "BIBLIOGRAFÍA", "TIPOLOGÍA", "ASOCIACIÓN"]
-    crono_partes = []
-
-    # 1. BÚSQUEDA EN TABLAS
+    
+    # 1. BÚSQUEDA EN TABLAS (Datos Generales)
     tablas = pagina.extract_tables()
     for tabla in tablas:
         for fila in tabla:
@@ -209,51 +208,27 @@ def extraer_datos_pdf_universal(pagina):
             for i, celda in enumerate(fila):
                 celda_clean = celda.replace("\n", " ").strip()
                 
-                # --- A. DATOS GENERALES ---
-                # Categoría: Miramos celda vecina Y también dentro de la misma celda (Corrección)
+                # --- Categoría (SA/HA) ---
                 if "Categoría" in celda:
-                    # Intento 1: Celda vecina
-                    if i + 1 < len(fila) and fila[i+1]:
+                    # Prioridad 1: Celda vecina con dato
+                    if i + 1 < len(fila) and fila[i+1].strip():
                         info["Categoría"] = fila[i+1]
-                    # Intento 2: Misma celda (si el texto es "Categoría (SA/HA): HA")
-                    else:
+                    # Prioridad 2: Misma celda si falló la vecina
+                    elif not info.get("Categoría"):
                         match_in_cell = re.search(r"(?:SA|HA)", celda_clean)
-                        if match_in_cell:
-                             info["Categoría"] = match_in_cell.group(0)
+                        if match_in_cell: info["Categoría"] = match_in_cell.group(0)
 
-                if "ID Sitio" in celda:
-                    if i + 1 < len(fila): info["ID Sitio"] = fila[i+1]
-                if "Fecha" in celda:
-                    if i + 1 < len(fila): info["Fecha"] = fila[i+1]
-                if "Responsable" in celda:
-                    if i + 1 < len(fila): info["Responsable"] = fila[i+1]
-                if "Coord. Central Norte" in celda:
-                    if i + 1 < len(fila): info["Coord. Norte"] = fila[i+1]
-                if "Coord. Central Este" in celda:
-                    if i + 1 < len(fila): info["Coord. Este"] = fila[i+1]
+                # Otros datos
+                if "ID Sitio" in celda and i+1 < len(fila): info["ID Sitio"] = fila[i+1]
+                if "Fecha" in celda and i+1 < len(fila): info["Fecha"] = fila[i+1]
+                if "Responsable" in celda and i+1 < len(fila): info["Responsable"] = fila[i+1]
+                if "Coord. Central Norte" in celda and i+1 < len(fila): info["Coord. Norte"] = fila[i+1]
+                if "Coord. Central Este" in celda and i+1 < len(fila): info["Coord. Este"] = fila[i+1]
 
-                # --- B. CRONOLOGÍA (Corrección "X" flexible) ---
-                # Buscamos la opción en la celda ACTUAL (izq) y la X en la SIGUIENTE (der)
-                opciones = ["Prehispánico", "Subactual", "Incierto", "Histórico"]
-                for op in opciones:
-                    if op in celda_clean:
-                        # Verificamos celda derecha
-                        if i + 1 < len(fila):
-                            vecino = fila[i+1].upper().strip()
-                            if "X" in vecino:
-                                crono_partes.append(op)
-                
-                # Periodo específico
-                if "Periodo específico" in celda_clean:
-                    if i + 1 < len(fila):
-                        val = fila[i+1].strip()
-                        if val and "X" not in val.upper():
-                            crono_partes.append(val)
-
-    # 2. BÚSQUEDA EN TEXTO (Respaldo)
+    # 2. BÚSQUEDA EN TEXTO (Para Descripción, Cronología y Respaldos)
     texto = pagina.extract_text()
     if texto:
-        # Descripción
+        # A. Descripción
         if not info.get("Descripción"):
             patron = r"Descripción\s*\n*(.*?)(?=" + "|".join(palabras_fin) + r"|$)"
             match = re.search(patron, texto, re.DOTALL | re.IGNORECASE)
@@ -268,19 +243,37 @@ def extraer_datos_pdf_universal(pagina):
                     if contenido.startswith("Otro"): contenido = contenido.replace("Otro", "", 1).strip()
                     info["Descripción"] = contenido
 
-        # Respaldos de datos
+        # B. Cronología (Escáner de Texto Puro)
+        # Busca la palabra clave seguida de una X (con cualquier cosa en medio, como tabuladores o espacios)
+        crono_hallada = []
+        
+        # Regex: Busca la palabra + caracteres opcionales + X (o x)
+        if re.search(r"Prehispánico.*?x", texto, re.IGNORECASE): crono_hallada.append("Prehispánico")
+        if re.search(r"Subactual.*?x", texto, re.IGNORECASE): crono_hallada.append("Subactual")
+        if re.search(r"Incierto.*?x", texto, re.IGNORECASE): crono_hallada.append("Incierto")
+        if re.search(r"Histórico.*?x", texto, re.IGNORECASE): crono_hallada.append("Histórico")
+        
+        # Periodo Específico: Busca el texto después de los dos puntos
+        match_periodo = re.search(r"Periodo específico:?\s*(.*?)(?:\n|$)", texto, re.IGNORECASE)
+        if match_periodo:
+            val = match_periodo.group(1).strip()
+            # Ignorar si es solo X o guiones
+            if len(val) > 1 and "x" not in val.lower():
+                crono_hallada.append(f"Periodo: {val}")
+        
+        if crono_hallada:
+            info["Cronología"] = ", ".join(list(set(crono_hallada)))
+
+        # C. Respaldos (Si la tabla falló)
         if not info.get("ID Sitio"):
             match = re.search(r"ID Sitio:?\s*([A-Za-z0-9\-]+)", texto, re.IGNORECASE)
             if match: info["ID Sitio"] = match.group(1).strip()
         if not info.get("Fecha"):
             match = re.search(r"Fecha:?\s*(\d{2}[-/]\d{2}[-/]\d{4})", texto)
             if match: info["Fecha"] = match.group(1).strip()
-        
-        # Respaldo Categoría (Regex más agresivo)
         if not info.get("Categoría"):
             match = re.search(r"(?:Categoría.*?)?\b(HA|SA)\b", texto)
             if match: info["Categoría"] = match.group(1).strip()
-            
         if not info.get("Coord. Norte"):
             match = re.search(r"Norte:?\s*(\d{6,8})", texto)
             if match: info["Coord. Norte"] = match.group(1)
@@ -290,29 +283,40 @@ def extraer_datos_pdf_universal(pagina):
         if not info.get("Responsable"):
             match = re.search(r"Responsable:?\s*(.*?)(?:\n|$)", texto, re.IGNORECASE)
             if match: info["Responsable"] = match.group(1).strip()
-
-    if crono_partes:
-        info["Cronología"] = ", ".join(list(set(crono_partes)))
     
     return info
 
 # ==========================================
-#   LÓGICA FOTO (V27 - SOLO LA PRIMERA)
+#   LÓGICA FOTO (V28 - LA MÁS GRANDE)
 # ==========================================
 
-def extraer_primera_foto(pagina):
+def extraer_foto_mas_grande(pagina):
     """
-    Captura la PRIMERA imagen que encuentre en la página.
+    Escanea todas las imágenes de la página y devuelve la MÁS GRANDE (Área).
+    Esto asegura capturar la foto principal y no un logo pequeño.
     """
     foto_bytes = None
     imagenes = pagina.images
     
-    if imagenes:
-        # Tomamos la primera de la lista (índice 0)
-        img_data = imagenes[0]
+    candidatos = []
+    
+    for img in imagenes:
+        # Calcular Área (Ancho x Alto)
+        w = float(img['width'])
+        h = float(img['height'])
+        area = w * h
         
-        # Obtenemos coordenadas
-        bbox = (img_data['x0'], img_data['top'], img_data['x1'], img_data['bottom'])
+        # Filtro mínimo para ignorar líneas o iconos diminutos
+        if w > 50 and h > 50:
+            candidatos.append((area, img))
+            
+    if candidatos:
+        # Ordenar por área descendente (la más grande primero)
+        candidatos.sort(key=lambda x: x[0], reverse=True)
+        
+        # Tomar la ganadora
+        mejor_img = candidatos[0][1]
+        bbox = (mejor_img['x0'], mejor_img['top'], mejor_img['x1'], mejor_img['bottom'])
         
         try:
             cropped = pagina.crop(bbox)
@@ -331,8 +335,8 @@ def procesar_pdf_completo(archivo_bytes):
     with pdfplumber.open(io.BytesIO(archivo_bytes)) as pdf:
         for pagina in pdf.pages:
             info = extraer_datos_pdf_universal(pagina)
-            # USAMOS LA NUEVA FUNCIÓN DE FOTO SIMPLE
-            info["foto_blob"] = extraer_primera_foto(pagina)
+            # FOTO: Usamos la lógica de "La más grande"
+            info["foto_blob"] = extraer_foto_mas_grande(pagina)
             
             if info.get("ID Sitio") or info.get("Fecha"):
                 datos_completos.append(info)
@@ -375,13 +379,13 @@ def crear_doc_tabla_horizontal(datos):
         row[6].text = str(item.get("Responsable", ""))
         row[7].text = str(item.get("Cronología", ""))
         
-        # Foto en columna 8
         if item.get("foto_blob"):
             p = row[8].paragraphs[0]
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             try:
                 run = p.add_run()
-                run.add_picture(io.BytesIO(item["foto_blob"]), width=Cm(4.0)) 
+                # Foto un poco más grande para que se vea bien
+                run.add_picture(io.BytesIO(item["foto_blob"]), width=Cm(4.5)) 
             except:
                 p.add_run("[Err]")
         else:
@@ -424,7 +428,6 @@ def mostrar_pagina_pdf_excel():
             datos = procesar_pdf_completo(archivo_pdf.read())
             if datos:
                 df = pd.DataFrame(datos)
-                # Orden estricto
                 orden = ["ID Sitio", "Coord. Norte", "Coord. Este", "Categoría", "Descripción", "Fecha", "Responsable", "Cronología"]
                 cols_finales = [c for c in orden if c in df.columns]
                 extras = [c for c in df.columns if c not in orden and c != "foto_blob"]
@@ -441,7 +444,7 @@ def mostrar_pagina_pdf_excel():
 
 def mostrar_pagina_fichas_con_fotos():
     st.title("Generador de Fichas Word con Foto")
-    st.markdown("Tabla horizontal con datos + Primera Foto encontrada.")
+    st.markdown("Tabla horizontal con datos + La foto más grande encontrada.")
     archivo_pdf = st.file_uploader("Subir PDF (.pdf)", type="pdf", key="pdf_foto_up")
     if archivo_pdf and st.button("Generar Word con Fotos"):
         with st.spinner("Procesando..."):

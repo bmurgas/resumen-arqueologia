@@ -8,6 +8,8 @@ from docx.enum.section import WD_ORIENT
 import io
 import pandas as pd
 import re
+import zipfile
+from pyproj import Transformer # Necesario para convertir coordenadas
 
 # --- CONFIGURACIÓN GLOBAL ---
 st.set_page_config(page_title="Arqueología - Suite Word", layout="wide")
@@ -40,6 +42,17 @@ def obtener_texto_celda_abajo(tabla, fila_idx, col_idx):
     except:
         pass
     return ""
+
+def limpiar_coordenada(texto):
+    """Convierte texto como '5.538.919' o '5538919,00' a float 5538919.0"""
+    # Eliminar puntos de miles y espacios
+    texto_limpio = texto.replace(".", "").replace(" ", "").strip()
+    # Reemplazar coma decimal por punto
+    texto_limpio = texto_limpio.replace(",", ".")
+    try:
+        return float(texto_limpio)
+    except:
+        return None
 
 # ==========================================
 # 2. LÓGICA: GENERADOR WORD (MAP)
@@ -242,7 +255,7 @@ def procesar_word_a_excel(archivo_bytes, nombre_archivo):
     return registros
 
 # ==========================================
-# 4. LÓGICA: GENERADOR FICHAS MAESTRO (DESDE WORD) - V35
+# 4. LÓGICA: GENERADOR FICHAS MAESTRO (DESDE WORD)
 # ==========================================
 
 def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
@@ -261,17 +274,13 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
             "Responsable": "", "Cronología": "", "foto_blob": None
         }
         es_ficha = False
-        
-        # Listas separadas para ordenar al final
-        crono_checks = [] # Prehispánico, etc.
-        crono_extra = []  # Periodo específico
+        crono_checks = [] 
+        crono_extra = [] 
 
         for r_idx, fila in enumerate(tabla.rows):
             for c_idx, celda in enumerate(fila.cells):
                 txt = celda.text.strip()
-                txt_lower = txt.lower()
                 
-                # --- IDENTIFICACIÓN ---
                 if "ID Sitio" in txt and c_idx + 1 < len(fila.cells):
                     val = fila.cells[c_idx+1].text.strip()
                     if val:
@@ -292,38 +301,27 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
                 if "Coord. Central Este" in txt and c_idx + 1 < len(fila.cells):
                     info["Coord. Este"] = fila.cells[c_idx+1].text.strip()
 
-                # --- DESCRIPCIÓN (Corrección "Sándwich") ---
-                # Buscamos la celda "Descripción" que está aislada
                 if txt == "Descripción": 
                     if c_idx + 1 < len(fila.cells):
                         vecino = fila.cells[c_idx+1].text.strip()
-                        
-                        # Si el vecino NO es Cronología, lo tomamos
                         if "CRONOLOGÍA" not in vecino:
                             info["Descripción"] = vecino
                 
-                # --- CRONOLOGÍA (Listas Separadas) ---
                 opciones = ["Prehispánico", "Subactual", "Incierto", "Histórico"]
                 for op in opciones:
                     if op in txt:
-                        # Mirar a la DERECHA buscando X
                         if c_idx + 1 < len(fila.cells):
                             val_vecino = fila.cells[c_idx+1].text.strip().upper()
                             if "X" in val_vecino:
                                 crono_checks.append(op)
                 
-                # Periodo específico: Limpieza y Orden
                 if "Periodo específico" in txt:
                     if c_idx + 1 < len(fila.cells):
                         val = fila.cells[c_idx+1].text.strip()
-                        
-                        # Limpieza: Borrar el título si se coló
                         val = val.replace("Periodo específico:", "").replace("Periodo específico", "").strip()
-                        
                         if val and len(val) > 1 and "X" not in val.upper():
                             crono_extra.append(f"Periodo específico: {val}")
 
-                # --- FOTO DETALLE ---
                 if "Fotografía detalle" in txt:
                     if r_idx > 0:
                         celda_arriba = tabla.rows[r_idx - 1].cells[c_idx]
@@ -331,10 +329,9 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
                         if imgs:
                             info["foto_blob"] = imgs[0][1]
 
-        # UNIÓN CRONOLOGÍA: Primero los Checks, luego el Texto
         full_crono = crono_checks + crono_extra
         if full_crono:
-            info["Cronología"] = ", ".join(list(set(full_crono))) # Set para evitar duplicados si la tabla es compleja
+            info["Cronología"] = ", ".join(list(set(full_crono)))
 
         if es_ficha and info["ID Sitio"]:
             fichas.append(info)
@@ -343,7 +340,6 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
 
 def crear_doc_tabla_horizontal(datos):
     doc = Document()
-    
     section = doc.sections[0]
     new_width, new_height = section.page_height, section.page_width
     section.orientation = WD_ORIENT.LANDSCAPE
@@ -353,7 +349,6 @@ def crear_doc_tabla_horizontal(datos):
     section.right_margin = Cm(1.0)
 
     doc.add_heading("Fichas de Hallazgos (Resumen)", 0)
-
     tabla = doc.add_table(rows=1, cols=9)
     tabla.style = 'Table Grid'
     
@@ -391,14 +386,118 @@ def crear_doc_tabla_horizontal(datos):
     return buffer
 
 # ==========================================
-#          MENÚ LATERAL
+# 5. LÓGICA: GENERADOR KMZ (NUEVA HERRAMIENTA)
+# ==========================================
+
+def crear_kml_texto(puntos):
+    """
+    Genera el texto XML para un archivo KML simple.
+    """
+    kml_header = """<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Hallazgos Arqueológicos</name>"""
+    
+    kml_footer = """
+  </Document>
+</kml>"""
+
+    kml_body = ""
+    for p in puntos:
+        kml_body += f"""
+    <Placemark>
+      <name>{p['nombre']}</name>
+      <description>{p['desc']}</description>
+      <Point>
+        <coordinates>{p['lon']},{p['lat']},0</coordinates>
+      </Point>
+    </Placemark>"""
+    
+    return kml_header + kml_body + kml_footer
+
+def procesar_kmz_desde_word(archivo_bytes, nombre_archivo):
+    """
+    Extrae ID y Coordenadas, convierte a Lat/Lon y empaqueta en KMZ.
+    Asume Huso 18S (EPSG:32718) por defecto.
+    """
+    try:
+        doc = Document(io.BytesIO(archivo_bytes))
+        # Configurar conversor: UTM 18S -> WGS84
+        # Si pyproj no está instalado, esto fallará.
+        transformer = Transformer.from_crs("epsg:32718", "epsg:4326", always_xy=True)
+    except ImportError:
+        st.error("Error: La librería 'pyproj' no está instalada. No se pueden convertir coordenadas.")
+        return None
+    except Exception as e:
+        st.error(f"Error leyendo {nombre_archivo}: {e}")
+        return None
+
+    puntos_kml = []
+    
+    for tabla in doc.tables:
+        id_sitio = ""
+        norte_str = ""
+        este_str = ""
+        desc = ""
+        
+        for fila in tabla.rows:
+            for i, celda in enumerate(fila.cells):
+                txt = celda.text.strip()
+                
+                if "ID Sitio" in txt and i+1 < len(fila.cells):
+                    val = fila.cells[i+1].text.strip()
+                    if val: id_sitio = val
+                
+                if "Coord. Central Norte" in txt and i+1 < len(fila.cells):
+                    norte_str = fila.cells[i+1].text.strip()
+                
+                if "Coord. Central Este" in txt and i+1 < len(fila.cells):
+                    este_str = fila.cells[i+1].text.strip()
+                
+                if "Categoría" in txt and i+1 < len(fila.cells):
+                    desc = fila.cells[i+1].text.strip()
+
+        # Si tenemos los datos mínimos, procesamos
+        if id_sitio and norte_str and este_str:
+            norte = limpiar_coordenada(norte_str)
+            este = limpiar_coordenada(este_str)
+            
+            if norte and este:
+                try:
+                    # Convertir UTM a Lat/Lon
+                    lon, lat = transformer.transform(este, norte)
+                    puntos_kml.append({
+                        "nombre": id_sitio,
+                        "desc": f"Categoría: {desc}",
+                        "lat": lat,
+                        "lon": lon
+                    })
+                except:
+                    continue
+
+    if not puntos_kml:
+        return None
+
+    # Crear el archivo KMZ en memoria
+    kmz_buffer = io.BytesIO()
+    with zipfile.ZipFile(kmz_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        # Escribir el doc.kml dentro del zip
+        kml_content = crear_kml_texto(puntos_kml)
+        zf.writestr("doc.kml", kml_content)
+    
+    kmz_buffer.seek(0)
+    return kmz_buffer
+
+# ==========================================
+#          MENÚ LATERAL (4 HERRAMIENTAS)
 # ==========================================
 
 st.sidebar.title("Arqueología App")
 opcion = st.sidebar.radio("Herramientas:", [
     "Generador Word (MAP)", 
     "Generador Excel (Desde Word)",
-    "Generador Fichas (Desde Word)"
+    "Generador Fichas (Desde Word)",
+    "Generador KMZ (Georreferenciación)"
 ])
 
 # 1. Generador Word (MAP)
@@ -443,7 +542,7 @@ elif opcion == "Generador Excel (Desde Word)":
             st.download_button("⬇️ Descargar Excel", buffer.getvalue(), "Resumen_Word_Excel.xlsx")
         else: st.error("No se encontraron datos.")
 
-# 3. Generador Fichas (Desde Word - MAESTRO)
+# 3. Generador Fichas (Desde Word)
 elif opcion == "Generador Fichas (Desde Word)":
     st.title("Generador de Fichas (Desde DOCX)")
     st.markdown("Extrae datos y fotos desde las Fichas de Hallazgo originales en Word.")
@@ -459,11 +558,8 @@ elif opcion == "Generador Fichas (Desde Word)":
         if todos_datos:
             st.success(f"✅ Se procesaron {len(todos_datos)} fichas.")
             
-            # Excel
             df = pd.DataFrame(todos_datos)
             df_excel = df.drop(columns=["foto_blob"], errors='ignore')
-            
-            # Reordenar Excel
             orden = ["ID Sitio", "Coord. Norte", "Coord. Este", "Categoría", "Descripción", "Fecha", "Responsable", "Cronología"]
             cols = [c for c in orden if c in df_excel.columns]
             df_excel = df_excel[cols]
@@ -472,7 +568,6 @@ elif opcion == "Generador Fichas (Desde Word)":
             with pd.ExcelWriter(buf_excel, engine='openpyxl') as writer:
                 df_excel.to_excel(writer, index=False, sheet_name="Hallazgos")
             
-            # Word
             buf_word = crear_doc_tabla_horizontal(todos_datos)
             
             col1, col2 = st.columns(2)
@@ -481,3 +576,60 @@ elif opcion == "Generador Fichas (Desde Word)":
             
             st.dataframe(df_excel)
         else: st.error("No se encontraron fichas válidas.")
+
+# 4. Generador KMZ (Nuevo)
+elif opcion == "Generador KMZ (Georreferenciación)":
+    st.title("Generador KMZ (Google Earth)")
+    st.markdown("Crea un archivo KMZ a partir de las coordenadas (UTM 18S) en los documentos Word.")
+    archivos = st.file_uploader("Subir Fichas de Hallazgo (.docx)", accept_multiple_files=True, key="kmz_up")
+    
+    if archivos and st.button("Generar KMZ"):
+        # Solo necesitamos procesar el primer archivo que resulte en un KMZ válido o combinarlos
+        # Aquí combinaremos todos los puntos en un solo KMZ
+        puntos_totales = []
+        # Reutilizamos la lógica interna para no repetir código, pero ajustada
+        
+        # Necesitamos instanciar el transformador una vez
+        try:
+            transformer = Transformer.from_crs("epsg:32718", "epsg:4326", always_xy=True)
+            
+            kmz_final_buffer = io.BytesIO()
+            puntos_acumulados = []
+            
+            bar = st.progress(0)
+            for i, a in enumerate(archivos):
+                # Procesamiento ligero solo buscando coords
+                try:
+                    doc = Document(io.BytesIO(a.read()))
+                    for tabla in doc.tables:
+                        id_sitio, norte, este, desc = "", "", "", ""
+                        for fila in tabla.rows:
+                            for idx, celda in enumerate(fila.cells):
+                                txt = celda.text.strip()
+                                if "ID Sitio" in txt and idx+1 < len(fila.cells): id_sitio = fila.cells[idx+1].text.strip()
+                                if "Coord. Central Norte" in txt and idx+1 < len(fila.cells): norte = fila.cells[idx+1].text.strip()
+                                if "Coord. Central Este" in txt and idx+1 < len(fila.cells): este = fila.cells[idx+1].text.strip()
+                                if "Categoría" in txt and idx+1 < len(fila.cells): desc = fila.cells[idx+1].text.strip()
+                        
+                        if id_sitio and norte and este:
+                            n = limpiar_coordenada(norte)
+                            e = limpiar_coordenada(este)
+                            if n and e:
+                                lon, lat = transformer.transform(e, n)
+                                puntos_acumulados.append({"nombre": id_sitio, "desc": desc, "lat": lat, "lon": lon})
+                except: pass
+                bar.progress((i+1)/len(archivos))
+            
+            if puntos_acumulados:
+                with zipfile.ZipFile(kmz_final_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                    kml_content = crear_kml_texto(puntos_acumulados)
+                    zf.writestr("doc.kml", kml_content)
+                kmz_final_buffer.seek(0)
+                
+                st.success(f"✅ Se generaron {len(puntos_acumulados)} puntos georreferenciados.")
+                st.download_button("⬇️ Descargar KMZ", kmz_final_buffer.getvalue(), "Hallazgos_Georreferenciados.kmz")
+            else:
+                st.error("No se encontraron coordenadas válidas.")
+                
+        except ImportError:
+            st.error("Error crítico: Falta la librería 'pyproj'.")

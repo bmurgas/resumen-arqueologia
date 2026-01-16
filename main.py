@@ -7,9 +7,16 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.section import WD_ORIENT
 import io
 import pandas as pd
-import re
 import zipfile
-from pyproj import Transformer # Necesario para convertir coordenadas
+import re
+from pyproj import Transformer
+
+# --- IMPORTACIONES NUEVAS PARA MAPA ---
+try:
+    import folium
+    from streamlit_folium import st_folium
+except ImportError:
+    pass # Se manejará el error en la función si no están instalados
 
 # --- CONFIGURACIÓN GLOBAL ---
 st.set_page_config(page_title="Arqueología - Suite Word", layout="wide")
@@ -45,9 +52,7 @@ def obtener_texto_celda_abajo(tabla, fila_idx, col_idx):
 
 def limpiar_coordenada(texto):
     """Convierte texto como '5.538.919' o '5538919,00' a float 5538919.0"""
-    # Eliminar puntos de miles y espacios
     texto_limpio = texto.replace(".", "").replace(" ", "").strip()
-    # Reemplazar coma decimal por punto
     texto_limpio = texto_limpio.replace(",", ".")
     try:
         return float(texto_limpio)
@@ -301,12 +306,14 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
                 if "Coord. Central Este" in txt and c_idx + 1 < len(fila.cells):
                     info["Coord. Este"] = fila.cells[c_idx+1].text.strip()
 
+                # Descripción (Exacta)
                 if txt == "Descripción": 
                     if c_idx + 1 < len(fila.cells):
                         vecino = fila.cells[c_idx+1].text.strip()
                         if "CRONOLOGÍA" not in vecino:
                             info["Descripción"] = vecino
                 
+                # Cronología (X a la derecha)
                 opciones = ["Prehispánico", "Subactual", "Incierto", "Histórico"]
                 for op in opciones:
                     if op in txt:
@@ -322,6 +329,7 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
                         if val and len(val) > 1 and "X" not in val.upper():
                             crono_extra.append(f"Periodo específico: {val}")
 
+                # Foto
                 if "Fotografía detalle" in txt:
                     if r_idx > 0:
                         celda_arriba = tabla.rows[r_idx - 1].cells[c_idx]
@@ -340,6 +348,7 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
 
 def crear_doc_tabla_horizontal(datos):
     doc = Document()
+    
     section = doc.sections[0]
     new_width, new_height = section.page_height, section.page_width
     section.orientation = WD_ORIENT.LANDSCAPE
@@ -386,22 +395,17 @@ def crear_doc_tabla_horizontal(datos):
     return buffer
 
 # ==========================================
-# 5. LÓGICA: GENERADOR KMZ (NUEVA HERRAMIENTA)
+# 5. LÓGICA: GENERADOR KMZ & MAPA INTERACTIVO
 # ==========================================
 
 def crear_kml_texto(puntos):
-    """
-    Genera el texto XML para un archivo KML simple.
-    """
     kml_header = """<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
     <name>Hallazgos Arqueológicos</name>"""
-    
     kml_footer = """
   </Document>
 </kml>"""
-
     kml_body = ""
     for p in puntos:
         kml_body += f"""
@@ -412,84 +416,49 @@ def crear_kml_texto(puntos):
         <coordinates>{p['lon']},{p['lat']},0</coordinates>
       </Point>
     </Placemark>"""
-    
     return kml_header + kml_body + kml_footer
 
-def procesar_kmz_desde_word(archivo_bytes, nombre_archivo):
+def obtener_puntos_geograficos(archivos):
     """
-    Extrae ID y Coordenadas, convierte a Lat/Lon y empaqueta en KMZ.
-    Asume Huso 18S (EPSG:32718) por defecto.
+    Función común para extraer coordenadas y convertirlas.
+    Devuelve lista de dicts: {'nombre', 'lat', 'lon', 'desc'}
     """
     try:
-        doc = Document(io.BytesIO(archivo_bytes))
-        # Configurar conversor: UTM 18S -> WGS84
-        # Si pyproj no está instalado, esto fallará.
         transformer = Transformer.from_crs("epsg:32718", "epsg:4326", always_xy=True)
-    except ImportError:
-        st.error("Error: La librería 'pyproj' no está instalada. No se pueden convertir coordenadas.")
-        return None
-    except Exception as e:
-        st.error(f"Error leyendo {nombre_archivo}: {e}")
+    except NameError:
+        return None # pyproj no instalado
+    except Exception:
         return None
 
-    puntos_kml = []
+    puntos_acumulados = []
     
-    for tabla in doc.tables:
-        id_sitio = ""
-        norte_str = ""
-        este_str = ""
-        desc = ""
-        
-        for fila in tabla.rows:
-            for i, celda in enumerate(fila.cells):
-                txt = celda.text.strip()
+    for a in archivos:
+        try:
+            doc = Document(io.BytesIO(a.read()))
+            for tabla in doc.tables:
+                id_sitio, norte, este, desc = "", "", "", ""
+                for fila in tabla.rows:
+                    for idx, celda in enumerate(fila.cells):
+                        txt = celda.text.strip()
+                        if "ID Sitio" in txt and idx+1 < len(fila.cells): id_sitio = fila.cells[idx+1].text.strip()
+                        if "Coord. Central Norte" in txt and idx+1 < len(fila.cells): norte = fila.cells[idx+1].text.strip()
+                        if "Coord. Central Este" in txt and idx+1 < len(fila.cells): este = fila.cells[idx+1].text.strip()
+                        if "Categoría" in txt and idx+1 < len(fila.cells): desc = fila.cells[idx+1].text.strip()
                 
-                if "ID Sitio" in txt and i+1 < len(fila.cells):
-                    val = fila.cells[i+1].text.strip()
-                    if val: id_sitio = val
-                
-                if "Coord. Central Norte" in txt and i+1 < len(fila.cells):
-                    norte_str = fila.cells[i+1].text.strip()
-                
-                if "Coord. Central Este" in txt and i+1 < len(fila.cells):
-                    este_str = fila.cells[i+1].text.strip()
-                
-                if "Categoría" in txt and i+1 < len(fila.cells):
-                    desc = fila.cells[i+1].text.strip()
-
-        # Si tenemos los datos mínimos, procesamos
-        if id_sitio and norte_str and este_str:
-            norte = limpiar_coordenada(norte_str)
-            este = limpiar_coordenada(este_str)
+                if id_sitio and norte and este:
+                    n = limpiar_coordenada(norte)
+                    e = limpiar_coordenada(este)
+                    if n and e:
+                        # Convertir
+                        lon, lat = transformer.transform(e, n)
+                        puntos_acumulados.append({"nombre": id_sitio, "desc": desc, "lat": lat, "lon": lon})
+        except:
+            continue
             
-            if norte and este:
-                try:
-                    # Convertir UTM a Lat/Lon
-                    lon, lat = transformer.transform(este, norte)
-                    puntos_kml.append({
-                        "nombre": id_sitio,
-                        "desc": f"Categoría: {desc}",
-                        "lat": lat,
-                        "lon": lon
-                    })
-                except:
-                    continue
-
-    if not puntos_kml:
-        return None
-
-    # Crear el archivo KMZ en memoria
-    kmz_buffer = io.BytesIO()
-    with zipfile.ZipFile(kmz_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        # Escribir el doc.kml dentro del zip
-        kml_content = crear_kml_texto(puntos_kml)
-        zf.writestr("doc.kml", kml_content)
-    
-    kmz_buffer.seek(0)
-    return kmz_buffer
+    return puntos_acumulados
 
 # ==========================================
-#          MENÚ LATERAL (4 HERRAMIENTAS)
+#          MENÚ LATERAL (5 HERRAMIENTAS)
 # ==========================================
 
 st.sidebar.title("Arqueología App")
@@ -497,7 +466,8 @@ opcion = st.sidebar.radio("Herramientas:", [
     "Generador Word (MAP)", 
     "Generador Excel (Desde Word)",
     "Generador Fichas (Desde Word)",
-    "Generador KMZ (Georreferenciación)"
+    "Generador KMZ (Georreferenciación)",
+    "Visor de Mapa Interactivo"
 ])
 
 # 1. Generador Word (MAP)
@@ -546,7 +516,6 @@ elif opcion == "Generador Excel (Desde Word)":
 elif opcion == "Generador Fichas (Desde Word)":
     st.title("Generador de Fichas (Desde DOCX)")
     st.markdown("Extrae datos y fotos desde las Fichas de Hallazgo originales en Word.")
-    st.info("Genera: Tabla Excel + Word Horizontal con Fotos.")
     archivos = st.file_uploader("Subir Fichas de Hallazgo (.docx)", accept_multiple_files=True, key="maestro_up")
     if archivos and st.button("Procesar Archivos"):
         todos_datos = []
@@ -557,79 +526,78 @@ elif opcion == "Generador Fichas (Desde Word)":
             bar.progress((i+1)/len(archivos))
         if todos_datos:
             st.success(f"✅ Se procesaron {len(todos_datos)} fichas.")
-            
             df = pd.DataFrame(todos_datos)
             df_excel = df.drop(columns=["foto_blob"], errors='ignore')
             orden = ["ID Sitio", "Coord. Norte", "Coord. Este", "Categoría", "Descripción", "Fecha", "Responsable", "Cronología"]
             cols = [c for c in orden if c in df_excel.columns]
             df_excel = df_excel[cols]
-
             buf_excel = io.BytesIO()
             with pd.ExcelWriter(buf_excel, engine='openpyxl') as writer:
                 df_excel.to_excel(writer, index=False, sheet_name="Hallazgos")
-            
             buf_word = crear_doc_tabla_horizontal(todos_datos)
-            
             col1, col2 = st.columns(2)
             col1.download_button("⬇️ Descargar Excel", buf_excel.getvalue(), "Base_Datos_Hallazgos.xlsx")
             col2.download_button("⬇️ Descargar Fichas Word", buf_word.getvalue(), "Fichas_Con_Fotos.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-            
             st.dataframe(df_excel)
         else: st.error("No se encontraron fichas válidas.")
 
-# 4. Generador KMZ (Nuevo)
+# 4. Generador KMZ
 elif opcion == "Generador KMZ (Georreferenciación)":
     st.title("Generador KMZ (Google Earth)")
     st.markdown("Crea un archivo KMZ a partir de las coordenadas (UTM 18S) en los documentos Word.")
     archivos = st.file_uploader("Subir Fichas de Hallazgo (.docx)", accept_multiple_files=True, key="kmz_up")
-    
     if archivos and st.button("Generar KMZ"):
-        # Solo necesitamos procesar el primer archivo que resulte en un KMZ válido o combinarlos
-        # Aquí combinaremos todos los puntos en un solo KMZ
-        puntos_totales = []
-        # Reutilizamos la lógica interna para no repetir código, pero ajustada
-        
-        # Necesitamos instanciar el transformador una vez
         try:
-            transformer = Transformer.from_crs("epsg:32718", "epsg:4326", always_xy=True)
-            
-            kmz_final_buffer = io.BytesIO()
-            puntos_acumulados = []
-            
-            bar = st.progress(0)
-            for i, a in enumerate(archivos):
-                # Procesamiento ligero solo buscando coords
-                try:
-                    doc = Document(io.BytesIO(a.read()))
-                    for tabla in doc.tables:
-                        id_sitio, norte, este, desc = "", "", "", ""
-                        for fila in tabla.rows:
-                            for idx, celda in enumerate(fila.cells):
-                                txt = celda.text.strip()
-                                if "ID Sitio" in txt and idx+1 < len(fila.cells): id_sitio = fila.cells[idx+1].text.strip()
-                                if "Coord. Central Norte" in txt and idx+1 < len(fila.cells): norte = fila.cells[idx+1].text.strip()
-                                if "Coord. Central Este" in txt and idx+1 < len(fila.cells): este = fila.cells[idx+1].text.strip()
-                                if "Categoría" in txt and idx+1 < len(fila.cells): desc = fila.cells[idx+1].text.strip()
-                        
-                        if id_sitio and norte and este:
-                            n = limpiar_coordenada(norte)
-                            e = limpiar_coordenada(este)
-                            if n and e:
-                                lon, lat = transformer.transform(e, n)
-                                puntos_acumulados.append({"nombre": id_sitio, "desc": desc, "lat": lat, "lon": lon})
-                except: pass
-                bar.progress((i+1)/len(archivos))
-            
-            if puntos_acumulados:
+            puntos = obtener_puntos_geograficos(archivos)
+            if puntos:
+                kmz_final_buffer = io.BytesIO()
                 with zipfile.ZipFile(kmz_final_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                    kml_content = crear_kml_texto(puntos_acumulados)
+                    kml_content = crear_kml_texto(puntos)
                     zf.writestr("doc.kml", kml_content)
                 kmz_final_buffer.seek(0)
-                
-                st.success(f"✅ Se generaron {len(puntos_acumulados)} puntos georreferenciados.")
+                st.success(f"✅ Se generaron {len(puntos)} puntos.")
                 st.download_button("⬇️ Descargar KMZ", kmz_final_buffer.getvalue(), "Hallazgos_Georreferenciados.kmz")
-            else:
-                st.error("No se encontraron coordenadas válidas.")
-                
-        except ImportError:
-            st.error("Error crítico: Falta la librería 'pyproj'.")
+            else: st.error("No se encontraron coordenadas válidas.")
+        except ImportError: st.error("Falta librería 'pyproj'.")
+
+# 5. Visor Mapa Interactivo (NUEVO)
+elif opcion == "Visor de Mapa Interactivo":
+    st.title("Visor de Mapa Interactivo")
+    st.markdown("Visualiza los hallazgos directamente en el mapa.")
+    
+    # Verificar dependencias del mapa
+    try:
+        import folium
+        from streamlit_folium import st_folium
+    except ImportError:
+        st.error("⚠️ Faltan las librerías 'folium' y 'streamlit-folium'. Por favor instálalas en requirements.txt")
+        st.stop()
+
+    archivos = st.file_uploader("Subir Fichas de Hallazgo (.docx)", accept_multiple_files=True, key="mapa_up")
+    
+    if archivos and st.button("Mostrar Mapa"):
+        puntos = obtener_puntos_geograficos(archivos)
+        
+        if puntos:
+            st.success(f"✅ Se encontraron {len(puntos)} puntos.")
+            
+            # Calcular centro del mapa (promedio de lat/lon)
+            avg_lat = sum(p['lat'] for p in puntos) / len(puntos)
+            avg_lon = sum(p['lon'] for p in puntos) / len(puntos)
+            
+            # Crear mapa base
+            m = folium.Map(location=[avg_lat, avg_lon], zoom_start=12)
+            
+            # Agregar marcadores
+            for p in puntos:
+                folium.Marker(
+                    [p['lat'], p['lon']],
+                    popup=f"<b>{p['nombre']}</b><br>{p['desc']}",
+                    tooltip=p['nombre']
+                ).add_to(m)
+            
+            # Mostrar en Streamlit
+            st_folium(m, width=800, height=500)
+            
+        else:
+            st.error("No se pudieron extraer coordenadas válidas.")

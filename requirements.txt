@@ -5,3 +5,5 @@ pandas
 openpyxl
 pdfplumber
 pyproj
+folium
+streamlit-folium

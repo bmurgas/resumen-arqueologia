@@ -11,12 +11,12 @@ import zipfile
 import re
 from pyproj import Transformer
 
-# --- IMPORTACIONES NUEVAS PARA MAPA ---
+# --- IMPORTACIONES PARA MAPA ---
 try:
     import folium
     from streamlit_folium import st_folium
 except ImportError:
-    pass # Se manejará el error en la función si no están instalados
+    pass
 
 # --- CONFIGURACIÓN GLOBAL ---
 st.set_page_config(page_title="Arqueología - Suite Word", layout="wide")
@@ -51,7 +51,6 @@ def obtener_texto_celda_abajo(tabla, fila_idx, col_idx):
     return ""
 
 def limpiar_coordenada(texto):
-    """Convierte texto como '5.538.919' o '5538919,00' a float 5538919.0"""
     texto_limpio = texto.replace(".", "").replace(" ", "").strip()
     texto_limpio = texto_limpio.replace(",", ".")
     try:
@@ -348,7 +347,6 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
 
 def crear_doc_tabla_horizontal(datos):
     doc = Document()
-    
     section = doc.sections[0]
     new_width, new_height = section.page_height, section.page_width
     section.orientation = WD_ORIENT.LANDSCAPE
@@ -419,14 +417,10 @@ def crear_kml_texto(puntos):
     return kml_header + kml_body + kml_footer
 
 def obtener_puntos_geograficos(archivos):
-    """
-    Función común para extraer coordenadas y convertirlas.
-    Devuelve lista de dicts: {'nombre', 'lat', 'lon', 'desc'}
-    """
     try:
         transformer = Transformer.from_crs("epsg:32718", "epsg:4326", always_xy=True)
     except NameError:
-        return None # pyproj no instalado
+        return None 
     except Exception:
         return None
 
@@ -449,7 +443,6 @@ def obtener_puntos_geograficos(archivos):
                     n = limpiar_coordenada(norte)
                     e = limpiar_coordenada(este)
                     if n and e:
-                        # Convertir
                         lon, lat = transformer.transform(e, n)
                         puntos_acumulados.append({"nombre": id_sitio, "desc": desc, "lat": lat, "lon": lon})
         except:
@@ -560,44 +553,58 @@ elif opcion == "Generador KMZ (Georreferenciación)":
             else: st.error("No se encontraron coordenadas válidas.")
         except ImportError: st.error("Falta librería 'pyproj'.")
 
-# 5. Visor Mapa Interactivo (NUEVO)
+# 5. Visor Mapa Interactivo (CORREGIDO V38)
 elif opcion == "Visor de Mapa Interactivo":
     st.title("Visor de Mapa Interactivo")
     st.markdown("Visualiza los hallazgos directamente en el mapa.")
     
-    # Verificar dependencias del mapa
     try:
         import folium
         from streamlit_folium import st_folium
     except ImportError:
-        st.error("⚠️ Faltan las librerías 'folium' y 'streamlit-folium'. Por favor instálalas en requirements.txt")
+        st.error("⚠️ Faltan las librerías 'folium' y 'streamlit-folium'.")
         st.stop()
 
     archivos = st.file_uploader("Subir Fichas de Hallazgo (.docx)", accept_multiple_files=True, key="mapa_up")
     
-    if archivos and st.button("Mostrar Mapa"):
+    # Inicializar estado si no existe
+    if 'map_points' not in st.session_state:
+        st.session_state.map_points = None
+
+    # Procesar solo al presionar el botón
+    if archivos and st.button("Procesar y Mostrar Mapa"):
         puntos = obtener_puntos_geograficos(archivos)
-        
         if puntos:
-            st.success(f"✅ Se encontraron {len(puntos)} puntos.")
-            
-            # Calcular centro del mapa (promedio de lat/lon)
-            avg_lat = sum(p['lat'] for p in puntos) / len(puntos)
-            avg_lon = sum(p['lon'] for p in puntos) / len(puntos)
-            
-            # Crear mapa base
-            m = folium.Map(location=[avg_lat, avg_lon], zoom_start=12)
-            
-            # Agregar marcadores
-            for p in puntos:
-                folium.Marker(
-                    [p['lat'], p['lon']],
-                    popup=f"<b>{p['nombre']}</b><br>{p['desc']}",
-                    tooltip=p['nombre']
-                ).add_to(m)
-            
-            # Mostrar en Streamlit
-            st_folium(m, width=800, height=500)
-            
+            st.session_state.map_points = puntos
         else:
             st.error("No se pudieron extraer coordenadas válidas.")
+
+    # Mostrar mapa si hay datos en memoria (Persistencia)
+    if st.session_state.map_points:
+        puntos = st.session_state.map_points
+        st.success(f"✅ Se encontraron {len(puntos)} puntos.")
+        
+        # Centro
+        avg_lat = sum(p['lat'] for p in puntos) / len(puntos)
+        avg_lon = sum(p['lon'] for p in puntos) / len(puntos)
+        
+        # Mapa base (Sin tiles iniciales para añadir Google)
+        m = folium.Map(location=[avg_lat, avg_lon], zoom_start=12, tiles=None)
+        
+        # Capa Google Satellite
+        folium.TileLayer(
+            tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+            attr='Google',
+            name='Google Satellite',
+            overlay=False,
+            control=True
+        ).add_to(m)
+        
+        for p in puntos:
+            folium.Marker(
+                [p['lat'], p['lon']],
+                popup=f"<b>{p['nombre']}</b><br>{p['desc']}",
+                tooltip=p['nombre']
+            ).add_to(m)
+        
+        st_folium(m, width=800, height=500)

@@ -13,7 +13,7 @@ import re
 st.set_page_config(page_title="Arqueología - Suite Word", layout="wide")
 
 # ==========================================
-# 1. FUNCIONES AUXILIARES (COMUNES)
+# 1. FUNCIONES AUXILIARES
 # ==========================================
 
 def obtener_imagenes_con_id(elemento_xml, doc_relacionado):
@@ -32,7 +32,6 @@ def obtener_imagenes_con_id(elemento_xml, doc_relacionado):
     return resultados
 
 def obtener_texto_celda_abajo(tabla, fila_idx, col_idx):
-    """Intenta recuperar el texto de la celda inmediatamente inferior."""
     try:
         if fila_idx + 1 < len(tabla.rows):
             fila_siguiente = tabla.rows[fila_idx + 1]
@@ -67,7 +66,6 @@ def procesar_archivo_v12(archivo_bytes, nombre_archivo):
         for r_idx, fila in enumerate(tabla.rows):
             texto_fila = " ".join([c.text.strip() for c in fila.cells]).strip()
             
-            # Fecha
             if "Fecha" in texto_fila:
                 for celda in fila.cells:
                     t = celda.text.strip()
@@ -76,7 +74,6 @@ def procesar_archivo_v12(archivo_bytes, nombre_archivo):
                         fecha_persistente = t
                         break
             
-            # Actividad
             if "Descripción de la actividad" in texto_fila:
                 mejor_texto = ""
                 celdas_fila_vistas = set()
@@ -90,13 +87,11 @@ def procesar_archivo_v12(archivo_bytes, nombre_archivo):
                 if mejor_texto:
                     datos_ficha["actividad"] = mejor_texto
 
-            # Hallazgos
             if "Ausencia" in texto_fila and any(c.text.strip().upper() == "X" for c in fila.cells):
                 datos_ficha["hallazgos"] = "Ausencia de hallazgos arqueológicos no previstos."
             if "Presencia" in texto_fila and any(c.text.strip().upper() == "X" for c in fila.cells):
                 datos_ficha["hallazgos"] = "PRESENCIA de hallazgos arqueológicos."
 
-            # Fotos
             if "Registro fotográfico" in texto_fila:
                 en_seccion_fotos = True
                 continue 
@@ -247,15 +242,15 @@ def procesar_word_a_excel(archivo_bytes, nombre_archivo):
     return registros
 
 # ==========================================
-# 4. LÓGICA: GENERADOR FICHAS MAESTRO (DESDE WORD) - V34 CORREGIDA
+# 4. LÓGICA: GENERADOR FICHAS MAESTRO (DESDE WORD) - V34
 # ==========================================
 
 def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
     """
     Lee DOCX de fichas.
-    - Descripción: Toma celda vecina (entre Descripción y Cronología).
-    - Cronología: Toma la opción que tenga "X" en la celda vecina.
-    - Foto: Toma celda superior a 'Fotografía detalle'.
+    Correcciones V34:
+    - Cronología: Busca X y mira a la IZQUIERDA.
+    - Descripción: Busca celda exacta y evita capturar 'CRONOLOGÍA'.
     """
     try:
         doc = Document(io.BytesIO(archivo_bytes))
@@ -279,63 +274,55 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
                 txt = celda.text.strip()
                 
                 # --- IDENTIFICACIÓN ---
-                if "ID Sitio" in txt:
-                    if c_idx + 1 < len(fila.cells):
-                        info["ID Sitio"] = fila.cells[c_idx+1].text.strip()
+                if "ID Sitio" in txt and c_idx + 1 < len(fila.cells):
+                    val = fila.cells[c_idx+1].text.strip()
+                    if val:
+                        info["ID Sitio"] = val
                         es_ficha = True
                 
-                if "Fecha" in txt:
-                    if c_idx + 1 < len(fila.cells):
-                        info["Fecha"] = fila.cells[c_idx+1].text.strip()
+                if "Fecha" in txt and c_idx + 1 < len(fila.cells):
+                    info["Fecha"] = fila.cells[c_idx+1].text.strip()
                         
-                if "Responsable" in txt:
-                    if c_idx + 1 < len(fila.cells):
-                        info["Responsable"] = fila.cells[c_idx+1].text.strip()
+                if "Responsable" in txt and c_idx + 1 < len(fila.cells):
+                    info["Responsable"] = fila.cells[c_idx+1].text.strip()
 
-                if "Categoría" in txt:
-                    if c_idx + 1 < len(fila.cells):
-                        info["Categoría"] = fila.cells[c_idx+1].text.strip()
+                if "Categoría" in txt and c_idx + 1 < len(fila.cells):
+                    info["Categoría"] = fila.cells[c_idx+1].text.strip()
 
-                if "Coord. Central Norte" in txt:
-                    if c_idx + 1 < len(fila.cells):
-                        info["Coord. Norte"] = fila.cells[c_idx+1].text.strip()
-                if "Coord. Central Este" in txt:
-                    if c_idx + 1 < len(fila.cells):
-                        info["Coord. Este"] = fila.cells[c_idx+1].text.strip()
+                if "Coord. Central Norte" in txt and c_idx + 1 < len(fila.cells):
+                    info["Coord. Norte"] = fila.cells[c_idx+1].text.strip()
+                if "Coord. Central Este" in txt and c_idx + 1 < len(fila.cells):
+                    info["Coord. Este"] = fila.cells[c_idx+1].text.strip()
 
-                # --- DESCRIPCIÓN (Lógica vecina estricta) ---
-                # Evitamos "Descripción de la actividad" y "Descripción de las evidencias"
-                # Solo queremos la celda que dice "Descripción"
-                if "Descripción" in txt and "actividad" not in txt.lower() and "evidencias" not in txt.lower():
+                # --- DESCRIPCIÓN (CORRECCIÓN V34) ---
+                # Buscamos la celda que es SOLO "Descripción" o "Descripción:"
+                if txt.lower() == "descripción" or txt.lower() == "descripción:":
                     if c_idx + 1 < len(fila.cells):
                          vecino = fila.cells[c_idx+1].text.strip()
-                         # Asegurarnos de que no capturamos el título "CRONOLOGÍA" si estuviera pegado
-                         if vecino and "CRONOLOGÍA" not in vecino:
+                         # Si el vecino es "CRONOLOGÍA", entonces está vacío.
+                         if vecino and "CRONOLOGÍA" not in vecino.upper():
                              info["Descripción"] = vecino
 
-                # --- CRONOLOGÍA (Lógica "X" en celda vecina) ---
-                opciones = ["Prehispánico", "Subactual", "Incierto", "Histórico"]
-                for op in opciones:
-                    if op in txt:
-                        # Miramos celda de la DERECHA
-                        if c_idx + 1 < len(fila.cells):
-                            val_vecino = fila.cells[c_idx+1].text.strip().lower()
-                            # Si tiene una "x", es la opción elegida
-                            if "x" in val_vecino:
-                                crono_partes.append(op)
+                # --- CRONOLOGÍA (CORRECCIÓN "MIRAR ATRÁS") ---
+                # Si encontramos una "X" aislada, miramos a la celda de la IZQUIERDA
+                if txt.upper() == "X":
+                    if c_idx > 0: # Si hay celda a la izquierda
+                        izq = fila.cells[c_idx-1].text.strip()
+                        if "Prehispánico" in izq: crono_partes.append("Prehispánico")
+                        if "Subactual" in izq: crono_partes.append("Subactual")
+                        if "Incierto" in izq: crono_partes.append("Incierto")
+                        if "Histórico" in izq: crono_partes.append("Histórico")
                 
-                # Caso Periodo Específico (Tomar texto vecina)
+                # Periodo específico (Label -> Value)
                 if "Periodo específico" in txt:
                     if c_idx + 1 < len(fila.cells):
                         val = fila.cells[c_idx+1].text.strip()
-                        # Si tiene texto y no es solo una X o guion
-                        if val and len(val) > 1 and "x" not in val.lower():
+                        if val and len(val) > 1 and "X" not in val.upper():
                             crono_partes.append(val)
 
                 # --- FOTO DETALLE ---
                 if "Fotografía detalle" in txt:
                     if r_idx > 0:
-                        # Buscar en la celda de ARRIBA (misma columna)
                         celda_arriba = tabla.rows[r_idx - 1].cells[c_idx]
                         imgs = obtener_imagenes_con_id(celda_arriba._element, doc)
                         if imgs:

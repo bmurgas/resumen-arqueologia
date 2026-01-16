@@ -242,16 +242,10 @@ def procesar_word_a_excel(archivo_bytes, nombre_archivo):
     return registros
 
 # ==========================================
-# 4. LÓGICA: GENERADOR FICHAS MAESTRO (DESDE WORD) - V34
+# 4. LÓGICA: GENERADOR FICHAS MAESTRO (DESDE WORD) - V35
 # ==========================================
 
 def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
-    """
-    Lee DOCX de fichas.
-    Correcciones V34:
-    - Cronología: Busca X y mira a la IZQUIERDA.
-    - Descripción: Busca celda exacta y evita capturar 'CRONOLOGÍA'.
-    """
     try:
         doc = Document(io.BytesIO(archivo_bytes))
     except Exception as e:
@@ -267,11 +261,15 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
             "Responsable": "", "Cronología": "", "foto_blob": None
         }
         es_ficha = False
-        crono_partes = []
+        
+        # Listas separadas para ordenar al final
+        crono_checks = [] # Prehispánico, etc.
+        crono_extra = []  # Periodo específico
 
         for r_idx, fila in enumerate(tabla.rows):
             for c_idx, celda in enumerate(fila.cells):
                 txt = celda.text.strip()
+                txt_lower = txt.lower()
                 
                 # --- IDENTIFICACIÓN ---
                 if "ID Sitio" in txt and c_idx + 1 < len(fila.cells):
@@ -294,31 +292,36 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
                 if "Coord. Central Este" in txt and c_idx + 1 < len(fila.cells):
                     info["Coord. Este"] = fila.cells[c_idx+1].text.strip()
 
-                # --- DESCRIPCIÓN (CORRECCIÓN V34) ---
-                # Buscamos la celda que es SOLO "Descripción" o "Descripción:"
-                if txt.lower() == "descripción" or txt.lower() == "descripción:":
+                # --- DESCRIPCIÓN (Corrección "Sándwich") ---
+                # Buscamos la celda "Descripción" que está aislada
+                if txt == "Descripción": 
                     if c_idx + 1 < len(fila.cells):
-                         vecino = fila.cells[c_idx+1].text.strip()
-                         # Si el vecino es "CRONOLOGÍA", entonces está vacío.
-                         if vecino and "CRONOLOGÍA" not in vecino.upper():
-                             info["Descripción"] = vecino
-
-                # --- CRONOLOGÍA (CORRECCIÓN "MIRAR ATRÁS") ---
-                # Si encontramos una "X" aislada, miramos a la celda de la IZQUIERDA
-                if txt.upper() == "X":
-                    if c_idx > 0: # Si hay celda a la izquierda
-                        izq = fila.cells[c_idx-1].text.strip()
-                        if "Prehispánico" in izq: crono_partes.append("Prehispánico")
-                        if "Subactual" in izq: crono_partes.append("Subactual")
-                        if "Incierto" in izq: crono_partes.append("Incierto")
-                        if "Histórico" in izq: crono_partes.append("Histórico")
+                        vecino = fila.cells[c_idx+1].text.strip()
+                        
+                        # Si el vecino NO es Cronología, lo tomamos
+                        if "CRONOLOGÍA" not in vecino:
+                            info["Descripción"] = vecino
                 
-                # Periodo específico (Label -> Value)
+                # --- CRONOLOGÍA (Listas Separadas) ---
+                opciones = ["Prehispánico", "Subactual", "Incierto", "Histórico"]
+                for op in opciones:
+                    if op in txt:
+                        # Mirar a la DERECHA buscando X
+                        if c_idx + 1 < len(fila.cells):
+                            val_vecino = fila.cells[c_idx+1].text.strip().upper()
+                            if "X" in val_vecino:
+                                crono_checks.append(op)
+                
+                # Periodo específico: Limpieza y Orden
                 if "Periodo específico" in txt:
                     if c_idx + 1 < len(fila.cells):
                         val = fila.cells[c_idx+1].text.strip()
+                        
+                        # Limpieza: Borrar el título si se coló
+                        val = val.replace("Periodo específico:", "").replace("Periodo específico", "").strip()
+                        
                         if val and len(val) > 1 and "X" not in val.upper():
-                            crono_partes.append(val)
+                            crono_extra.append(f"Periodo específico: {val}")
 
                 # --- FOTO DETALLE ---
                 if "Fotografía detalle" in txt:
@@ -328,8 +331,10 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
                         if imgs:
                             info["foto_blob"] = imgs[0][1]
 
-        if crono_partes:
-            info["Cronología"] = ", ".join(list(set(crono_partes)))
+        # UNIÓN CRONOLOGÍA: Primero los Checks, luego el Texto
+        full_crono = crono_checks + crono_extra
+        if full_crono:
+            info["Cronología"] = ", ".join(list(set(full_crono))) # Set para evitar duplicados si la tabla es compleja
 
         if es_ficha and info["ID Sitio"]:
             fichas.append(info)
@@ -386,7 +391,7 @@ def crear_doc_tabla_horizontal(datos):
     return buffer
 
 # ==========================================
-#          MENÚ LATERAL (3 HERRAMIENTAS)
+#          MENÚ LATERAL
 # ==========================================
 
 st.sidebar.title("Arqueología App")
@@ -457,7 +462,8 @@ elif opcion == "Generador Fichas (Desde Word)":
             # Excel
             df = pd.DataFrame(todos_datos)
             df_excel = df.drop(columns=["foto_blob"], errors='ignore')
-            # Reordenar Excel para que coincida con el Word
+            
+            # Reordenar Excel
             orden = ["ID Sitio", "Coord. Norte", "Coord. Este", "Categoría", "Descripción", "Fecha", "Responsable", "Cronología"]
             cols = [c for c in orden if c in df_excel.columns]
             df_excel = df_excel[cols]

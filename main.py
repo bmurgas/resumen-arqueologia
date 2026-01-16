@@ -9,6 +9,7 @@ import io
 import pandas as pd
 import zipfile
 import re
+import base64 # Nueva librería para manejar imágenes en el mapa
 from pyproj import Transformer
 
 # --- IMPORTACIONES PARA MAPA ---
@@ -305,14 +306,14 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
                 if "Coord. Central Este" in txt and c_idx + 1 < len(fila.cells):
                     info["Coord. Este"] = fila.cells[c_idx+1].text.strip()
 
-                # Descripción (Exacta)
+                # Descripción
                 if txt == "Descripción": 
                     if c_idx + 1 < len(fila.cells):
                         vecino = fila.cells[c_idx+1].text.strip()
                         if "CRONOLOGÍA" not in vecino:
                             info["Descripción"] = vecino
                 
-                # Cronología (X a la derecha)
+                # Cronología
                 opciones = ["Prehispánico", "Subactual", "Incierto", "Histórico"]
                 for op in opciones:
                     if op in txt:
@@ -347,6 +348,7 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
 
 def crear_doc_tabla_horizontal(datos):
     doc = Document()
+    
     section = doc.sections[0]
     new_width, new_height = section.page_height, section.page_width
     section.orientation = WD_ORIENT.LANDSCAPE
@@ -416,12 +418,13 @@ def crear_kml_texto(puntos):
     </Placemark>"""
     return kml_header + kml_body + kml_footer
 
-def obtener_puntos_geograficos(archivos):
+def obtener_puntos_geograficos_con_foto(archivos):
+    """
+    Extrae coords y FOTOS para el mapa interactivo.
+    """
     try:
         transformer = Transformer.from_crs("epsg:32718", "epsg:4326", always_xy=True)
-    except NameError:
-        return None 
-    except Exception:
+    except:
         return None
 
     puntos_acumulados = []
@@ -431,27 +434,44 @@ def obtener_puntos_geograficos(archivos):
             doc = Document(io.BytesIO(a.read()))
             for tabla in doc.tables:
                 id_sitio, norte, este, desc = "", "", "", ""
-                for fila in tabla.rows:
+                foto_bytes = None
+                
+                for r_idx, fila in enumerate(tabla.rows):
                     for idx, celda in enumerate(fila.cells):
                         txt = celda.text.strip()
+                        
+                        # Datos
                         if "ID Sitio" in txt and idx+1 < len(fila.cells): id_sitio = fila.cells[idx+1].text.strip()
                         if "Coord. Central Norte" in txt and idx+1 < len(fila.cells): norte = fila.cells[idx+1].text.strip()
                         if "Coord. Central Este" in txt and idx+1 < len(fila.cells): este = fila.cells[idx+1].text.strip()
                         if "Categoría" in txt and idx+1 < len(fila.cells): desc = fila.cells[idx+1].text.strip()
+                        
+                        # Foto (para el mapa)
+                        if "Fotografía detalle" in txt and r_idx > 0:
+                            celda_arriba = tabla.rows[r_idx - 1].cells[idx]
+                            imgs = obtener_imagenes_con_id(celda_arriba._element, doc)
+                            if imgs:
+                                foto_bytes = imgs[0][1]
                 
                 if id_sitio and norte and este:
                     n = limpiar_coordenada(norte)
                     e = limpiar_coordenada(este)
                     if n and e:
                         lon, lat = transformer.transform(e, n)
-                        puntos_acumulados.append({"nombre": id_sitio, "desc": desc, "lat": lat, "lon": lon})
+                        puntos_acumulados.append({
+                            "nombre": id_sitio, 
+                            "desc": desc, 
+                            "lat": lat, 
+                            "lon": lon,
+                            "foto": foto_bytes
+                        })
         except:
             continue
             
     return puntos_acumulados
 
 # ==========================================
-#          MENÚ LATERAL (5 HERRAMIENTAS)
+#          MENÚ LATERAL
 # ==========================================
 
 st.sidebar.title("Arqueología App")
@@ -541,7 +561,7 @@ elif opcion == "Generador KMZ (Georreferenciación)":
     archivos = st.file_uploader("Subir Fichas de Hallazgo (.docx)", accept_multiple_files=True, key="kmz_up")
     if archivos and st.button("Generar KMZ"):
         try:
-            puntos = obtener_puntos_geograficos(archivos)
+            puntos = obtener_puntos_geograficos_con_foto(archivos)
             if puntos:
                 kmz_final_buffer = io.BytesIO()
                 with zipfile.ZipFile(kmz_final_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -553,10 +573,10 @@ elif opcion == "Generador KMZ (Georreferenciación)":
             else: st.error("No se encontraron coordenadas válidas.")
         except ImportError: st.error("Falta librería 'pyproj'.")
 
-# 5. Visor Mapa Interactivo (CORREGIDO V38)
+# 5. Visor Mapa Interactivo (CORREGIDO V39)
 elif opcion == "Visor de Mapa Interactivo":
     st.title("Visor de Mapa Interactivo")
-    st.markdown("Visualiza los hallazgos directamente en el mapa.")
+    st.markdown("Visualiza los hallazgos en Google Satélite con fotos.")
     
     try:
         import folium
@@ -567,31 +587,28 @@ elif opcion == "Visor de Mapa Interactivo":
 
     archivos = st.file_uploader("Subir Fichas de Hallazgo (.docx)", accept_multiple_files=True, key="mapa_up")
     
-    # Inicializar estado si no existe
     if 'map_points' not in st.session_state:
         st.session_state.map_points = None
 
-    # Procesar solo al presionar el botón
     if archivos and st.button("Procesar y Mostrar Mapa"):
-        puntos = obtener_puntos_geograficos(archivos)
-        if puntos:
-            st.session_state.map_points = puntos
-        else:
-            st.error("No se pudieron extraer coordenadas válidas.")
+        with st.spinner("Leyendo coordenadas y fotos..."):
+            puntos = obtener_puntos_geograficos_con_foto(archivos)
+            if puntos:
+                st.session_state.map_points = puntos
+            else:
+                st.error("No se pudieron extraer datos.")
 
-    # Mostrar mapa si hay datos en memoria (Persistencia)
     if st.session_state.map_points:
         puntos = st.session_state.map_points
         st.success(f"✅ Se encontraron {len(puntos)} puntos.")
         
-        # Centro
         avg_lat = sum(p['lat'] for p in puntos) / len(puntos)
         avg_lon = sum(p['lon'] for p in puntos) / len(puntos)
         
-        # Mapa base (Sin tiles iniciales para añadir Google)
+        # Mapa base limpio para poner Google Sat
         m = folium.Map(location=[avg_lat, avg_lon], zoom_start=12, tiles=None)
         
-        # Capa Google Satellite
+        # Capa Satélite
         folium.TileLayer(
             tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
             attr='Google',
@@ -601,10 +618,30 @@ elif opcion == "Visor de Mapa Interactivo":
         ).add_to(m)
         
         for p in puntos:
-            folium.Marker(
-                [p['lat'], p['lon']],
-                popup=f"<b>{p['nombre']}</b><br>{p['desc']}",
+            # HTML Popup con Foto Base64
+            html = f"<div style='font-family: Arial; width: 200px;'>"
+            html += f"<b>{p['nombre']}</b><br><i style='font-size:12px'>{p['desc']}</i>"
+            
+            if p['foto']:
+                # Convertir bytes a base64
+                b64 = base64.b64encode(p['foto']).decode('utf-8')
+                html += f"<br><img src='data:image/jpeg;base64,{b64}' width='100%' style='margin-top:5px; border-radius:5px;'>"
+            
+            html += "</div>"
+            
+            iframe = folium.IFrame(html, width=220, height=220)
+            popup = folium.Popup(iframe, max_width=220)
+            
+            # Marcador como PUNTO ROJO (CircleMarker)
+            folium.CircleMarker(
+                location=[p['lat'], p['lon']],
+                radius=6,
+                color='red',
+                fill=True,
+                fill_color='red',
+                fill_opacity=1.0,
+                popup=popup,
                 tooltip=p['nombre']
             ).add_to(m)
         
-        st_folium(m, width=800, height=500)
+        st_folium(m, width=900, height=600)

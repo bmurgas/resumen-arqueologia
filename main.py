@@ -9,8 +9,16 @@ import io
 import pandas as pd
 import zipfile
 import re
-import base64 # Nueva librería para manejar imágenes en el mapa
+import base64 
 from pyproj import Transformer
+from datetime import datetime
+import locale
+
+# --- IMPORTACIÓN NUEVA PARA PDF ---
+try:
+    import fitz  # PyMuPDF
+except ImportError:
+    st.error("Falta instalar la librería 'pymupdf'. Ejecuta: pip install pymupdf")
 
 # --- IMPORTACIONES PARA MAPA ---
 try:
@@ -60,7 +68,7 @@ def limpiar_coordenada(texto):
         return None
 
 # ==========================================
-# 2. LÓGICA: GENERADOR WORD (MAP)
+# 2. LÓGICA: GENERADOR WORD (MAP - DESDE WORD)
 # ==========================================
 
 def procesar_archivo_v12(archivo_bytes, nombre_archivo):
@@ -212,6 +220,120 @@ def generar_word_con_formato(datos):
     doc.save(buffer)
     buffer.seek(0)
     return buffer
+
+# ==========================================
+# 2.1 LÓGICA NUEVA: GENERADOR WORD MAP (DESDE PDF)
+# ==========================================
+
+def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
+    """
+    Extrae Fecha, Actividad y Fotos de reportes en PDF usando PyMuPDF (fitz).
+    """
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as e:
+        st.error(f"Error abriendo PDF {nombre_archivo}: {e}")
+        return []
+
+    fichas = []
+    ficha_actual = {
+        "fecha": None,
+        "texto_central": "",
+        "fotos": []
+    }
+    
+    # Variables de estado para rastrear bloques
+    leyendo_ficha = False
+
+    for pagina_idx, pagina in enumerate(doc):
+        texto_pagina = pagina.get_text("blocks")
+        texto_plano = pagina.get_text("text")
+
+        # 1. DETECTAR NUEVA FICHA (Inicio de "I. IDENTIFICACIÓN")
+        if "I. IDENTIFICACIÓN" in texto_plano or "Ficha de Monitoreo Arqueológico" in texto_plano:
+            # Si ya teníamos una ficha abierta con datos, la guardamos
+            if ficha_actual["fecha"] or ficha_actual["texto_central"] or ficha_actual["fotos"]:
+                fichas.append(ficha_actual)
+            
+            # Reiniciar ficha
+            ficha_actual = {
+                "fecha": None,
+                "texto_central": "",
+                "fotos": []
+            }
+            leyendo_ficha = True
+
+        # 2. EXTRAER FECHA
+        # Buscamos bloques que contengan la fecha (formato dd/mm/yyyy)
+        if not ficha_actual["fecha"]:
+            # Busqueda simple por regex en todo el texto de la pagina
+            match_fecha = re.search(r"(\d{2}/\d{2}/\d{4})", texto_plano)
+            if match_fecha:
+                ficha_actual["fecha"] = match_fecha.group(1)
+
+        # 3. EXTRAER ACTIVIDAD ("V. DESCRIPCIONES" o "Descripción de la Actividad")
+        # Estrategia: Buscar el bloque que dice "Descripción de la Actividad" y tomar el siguiente bloque
+        for i, bloque in enumerate(texto_pagina):
+            texto_bloque = bloque[4].strip()
+            if "Descripción de la Actividad" in texto_bloque:
+                # Intentamos tomar el bloque siguiente
+                if i + 1 < len(texto_pagina):
+                    texto_siguiente = texto_pagina[i+1][4].strip()
+                    # Evitamos headers o secciones siguientes
+                    if "VI." not in texto_siguiente and "CARACTERÍSTICAS" not in texto_siguiente:
+                        ficha_actual["texto_central"] += texto_siguiente + "\n"
+
+        # 4. EXTRAER FOTOS ("VIII. REGISTRO FOTOGRÁFICO")
+        # Si la página tiene esta sección o estamos en páginas posteriores de la misma ficha
+        if "REGISTRO FOTOGRÁFICO" in texto_plano or len(pagina.get_images()) > 0:
+            
+            # Solo procesamos imágenes si estamos seguros que es sección de fotos (heurística simple)
+            # O si la página contiene la palabra "Hallazgo" o "Vista" junto con imágenes.
+            
+            lista_imagenes = pagina.get_images(full=True)
+            
+            for img_index, img in enumerate(lista_imagenes):
+                xref = img[0]
+                base_image = doc.extract_image(xref)
+                image_bytes = base_image["image"]
+                width = base_image["width"]
+                height = base_image["height"]
+
+                # FILTRO: Ignorar logos pequeños (ej. logos empresa < 100px)
+                if width < 150 or height < 150:
+                    continue
+
+                # INTENTO DE OBTENER LEYENDA (TEXTO CERCANO)
+                # Obtenemos el rectángulo de la imagen
+                img_rect = pagina.get_image_bbox(img)
+                leyenda_encontrada = ""
+                
+                # Buscamos bloques de texto que estén cerca (debajo o arriba)
+                for bloque in texto_pagina:
+                    b_rect = fitz.Rect(bloque[:4])
+                    b_text = bloque[4].strip()
+                    
+                    # Si el texto está muy cerca verticalmente de la imagen
+                    distancia_vertical = min(abs(b_rect.y0 - img_rect.y1), abs(img_rect.y0 - b_rect.y1))
+                    
+                    # Si está cerca (ej. menos de 50 pt) y no es un título de sección
+                    if distancia_vertical < 60 and len(b_text) > 3 and "REGISTRO FOTOGRÁFICO" not in b_text:
+                        leyenda_encontrada = b_text
+                        # Un break aquí asocia la primera leyenda encontrada, es una heurística.
+                        # Para mejorar precisión se requeriría análisis geométrico complejo.
+                        break
+                
+                # Agregamos la foto
+                ficha_actual["fotos"].append({
+                    "blob": image_bytes,
+                    "leyenda": leyenda_encontrada
+                })
+
+    # Al finalizar el loop, guardar la última ficha si quedó pendiente
+    if ficha_actual["fecha"] or ficha_actual["texto_central"] or ficha_actual["fotos"]:
+        fichas.append(ficha_actual)
+
+    return fichas
 
 # ==========================================
 # 3. LÓGICA: GENERADOR EXCEL (DESDE WORD)
@@ -477,16 +599,17 @@ def obtener_puntos_geograficos_con_foto(archivos):
 st.sidebar.title("Arqueología App")
 opcion = st.sidebar.radio("Herramientas:", [
     "Generador Word (MAP)", 
+    "Generador Word MAP (Desde PDF)", # <--- NUEVA OPCIÓN AGREGADA
     "Generador Excel (Desde Word)",
     "Generador Fichas (Desde Word)",
     "Generador KMZ (Georreferenciación)",
     "Visor de Mapa Interactivo"
 ])
 
-# 1. Generador Word (MAP)
+# 1. Generador Word (MAP - Desde Word)
 if opcion == "Generador Word (MAP)":
-    st.title("Generador Word MAP")
-    st.markdown("Crea la tabla resumen mensual a partir de los anexos diarios.")
+    st.title("Generador Word MAP (Desde DOCX)")
+    st.markdown("Crea la tabla resumen mensual a partir de los anexos diarios en Word.")
     st.info("Configuración: Franklin Gothic Book 9 | Fotos 8x6 cm | Centrado")
     archivos = st.file_uploader("Subir Anexos Word (.docx)", accept_multiple_files=True, key="word_up")
     if archivos and st.button("Generar Informe Word"):
@@ -502,6 +625,35 @@ if opcion == "Generador Word (MAP)":
             st.success("✅ Informe Word generado.")
             st.download_button("Descargar Word", doc_out, "Resumen_MAP.docx")
         else: st.error("No se encontraron datos.")
+
+# 1.1 Generador Word MAP (Desde PDF) - NUEVO
+elif opcion == "Generador Word MAP (Desde PDF)":
+    st.title("Generador Word MAP (Desde PDF)")
+    st.markdown("Crea la tabla resumen mensual extrayendo datos de reportes en PDF.")
+    st.warning("Requiere librería 'pymupdf' instalada.")
+    
+    archivos = st.file_uploader("Subir Reportes PDF (.pdf)", accept_multiple_files=True, key="pdf_up")
+    
+    if archivos and st.button("Procesar PDFs y Generar Word"):
+        todas_fichas = []
+        bar = st.progress(0)
+        
+        for i, a in enumerate(archivos):
+            fichas = procesar_pdf_a_word_map(a.read(), a.name)
+            todas_fichas.extend(fichas)
+            bar.progress((i+1)/len(archivos))
+            
+        if todas_fichas:
+            # Ordenar por fecha si es posible
+            todas_fichas.sort(key=lambda x: x['fecha'] if x['fecha'] else "ZZZ")
+            
+            # Reutilizamos la función de formato que ya existe
+            doc_out = generar_word_con_formato(todas_fichas)
+            
+            st.success(f"✅ Se procesaron {len(todas_fichas)} fichas desde PDF.")
+            st.download_button("Descargar Word Resumen", doc_out, "Resumen_MAP_Desde_PDF.docx")
+        else:
+            st.error("No se pudieron extraer datos válidos de los PDFs.")
 
 # 2. Generador Excel (Desde Word)
 elif opcion == "Generador Excel (Desde Word)":
@@ -573,7 +725,7 @@ elif opcion == "Generador KMZ (Georreferenciación)":
             else: st.error("No se encontraron coordenadas válidas.")
         except ImportError: st.error("Falta librería 'pyproj'.")
 
-# 5. Visor Mapa Interactivo (CORREGIDO V39)
+# 5. Visor Mapa Interactivo
 elif opcion == "Visor de Mapa Interactivo":
     st.title("Visor de Mapa Interactivo")
     st.markdown("Visualiza los hallazgos en Google Satélite con fotos.")
@@ -632,7 +784,7 @@ elif opcion == "Visor de Mapa Interactivo":
             iframe = folium.IFrame(html, width=220, height=220)
             popup = folium.Popup(iframe, max_width=220)
             
-            # Marcador como PUNTO ROJO (CircleMarker)
+            # Marcador como PUNTO ROJO
             folium.CircleMarker(
                 location=[p['lat'], p['lon']],
                 radius=6,

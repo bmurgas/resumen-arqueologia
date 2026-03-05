@@ -7,3 +7,4 @@ pdfplumber
 pyproj
 folium
 streamlit-folium
+pymupdf

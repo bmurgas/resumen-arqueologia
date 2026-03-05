@@ -195,7 +195,7 @@ def generar_word_con_formato(datos):
         
         celda_img = row[2]
         p_img = celda_img.paragraphs[0]
-        p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER  # <--- CORREGIDO AQUÍ
+        p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
         
         if not item["fotos"]:
             r_sin = p_img.add_run("[Sin fotos]")
@@ -222,16 +222,15 @@ def generar_word_con_formato(datos):
     return buffer
 
 # ==========================================
-# 2.1 LÓGICA NUEVA: GENERADOR WORD MAP (DESDE PDF) - CORREGIDO
+# 2.1 LÓGICA NUEVA: GENERADOR WORD MAP (DESDE PDF) - V2 CORREGIDA
 # ==========================================
 
 def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     """
     Extrae Fecha, Actividad y Fotos de reportes en PDF usando PyMuPDF (fitz).
-    CORECCIONES:
-    - Ordena bloques por posición vertical para evitar errores de lectura.
-    - Detecta "No se registraron fotografías" para no agregar basura.
-    - Mejora la captura de descripciones largas.
+    CORRECCIONES V2:
+    - Captura descripción buscando entre bloques "Huso" y "VI. CARACTERÍSTICAS" para ser infalible al desorden.
+    - Filtro estricto de fotos: Solo debajo del título "VIII. REGISTRO FOTOGRÁFICO".
     """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -240,7 +239,6 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
         return []
 
     fichas = []
-    # Estructura temporal para acumular datos de una ficha
     ficha_actual = {
         "fecha": None,
         "texto_central": "",
@@ -248,99 +246,100 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     }
     
     for pagina_idx, pagina in enumerate(doc):
-        # 1. OBTENER BLOQUES Y ORDENARLOS VISUALMENTE (Arriba a abajo)
-        # Esto soluciona el problema donde el texto aparecía "antes" en el código PDF
+        # 1. ORDENAR BLOQUES VISUALMENTE
         bloques = pagina.get_text("blocks")
-        bloques.sort(key=lambda b: b[1]) # Ordenar por coordenada Y (vertical)
+        bloques.sort(key=lambda b: b[1]) # Ordenar por coordenada Y
         
         texto_plano_pagina = pagina.get_text("text")
 
-        # DETECTAR NUEVA FICHA (Inicio de "I. IDENTIFICACIÓN")
+        # DETECTAR NUEVA FICHA
         if "I. IDENTIFICACIÓN" in texto_plano_pagina or "Ficha de Monitoreo Arqueológico" in texto_plano_pagina:
-            # Si la ficha actual tiene datos acumulados, la guardamos antes de limpiar
             if ficha_actual["fecha"] or ficha_actual["texto_central"] or ficha_actual["fotos"]:
                 fichas.append(ficha_actual)
-            
-            # Reiniciar ficha para la nueva página/sección
-            ficha_actual = {
-                "fecha": None,
-                "texto_central": "",
-                "fotos": []
-            }
+            ficha_actual = { "fecha": None, "texto_central": "", "fotos": [] }
 
-        # 2. EXTRAER FECHA (si aún no tenemos fecha para esta ficha)
+        # 2. FECHA
         if not ficha_actual["fecha"]:
             match_fecha = re.search(r"(\d{2}/\d{2}/\d{4})", texto_plano_pagina)
             if match_fecha:
                 ficha_actual["fecha"] = match_fecha.group(1)
 
-        # 3. EXTRAER ACTIVIDAD (Lógica mejorada por bloques ordenados)
-        # Buscamos el índice del bloque que dice "Descripción de la Actividad"
-        idx_titulo_actividad = -1
-        for i, b in enumerate(bloques):
-            if "Descripción de la Actividad" in b[4]:
-                idx_titulo_actividad = i
-                break
+        # 3. ACTIVIDAD - LÓGICA ROBUSTA
+        # Buscamos el índice del bloque "Huso" (fin sección IV) y "VI. CARACTERÍSTICAS" (inicio sección VI)
+        idx_inicio = -1
+        idx_fin = -1
         
-        # Si encontramos el título, capturamos todo lo que hay debajo hasta la siguiente sección
-        if idx_titulo_actividad != -1:
+        for i, b in enumerate(bloques):
+            txt = b[4].strip()
+            if "Huso" in txt or "IV. GEORREFERENCIACIÓN" in txt:
+                idx_inicio = i
+            if "VI. CARACTERÍSTICAS" in txt:
+                idx_fin = i
+                break # Encontramos el cierre
+        
+        # Si encontramos ambos marcadores, capturamos TODO lo que hay en medio (filtrando títulos)
+        if idx_inicio != -1 and idx_fin != -1:
             texto_acumulado = ""
-            for i in range(idx_titulo_actividad + 1, len(bloques)):
-                texto_bloque = bloques[i][4].strip()
-                
-                # CONDICIONES DE PARADA (Inicio de secciones siguientes)
-                if "VI." in texto_bloque or "CARACTERÍSTICAS" in texto_bloque or "Maquinaria" in texto_bloque:
-                    break
-                
-                # Ignorar encabezados repetidos o basura pequeña
-                if "Huso" in texto_bloque or len(texto_bloque) < 2:
+            for i in range(idx_inicio + 1, idx_fin):
+                b_text = bloques[i][4].strip()
+                # Filtramos los títulos que pueden estar en medio
+                if "V. DESCRIPCIONES" in b_text or "Descripción de la Actividad" in b_text:
                     continue
-                    
-                texto_acumulado += texto_bloque + "\n"
+                if len(b_text) < 2: continue # Ignorar basura
+                
+                texto_acumulado += b_text + "\n"
             
             if texto_acumulado:
-                # Concatenamos por si la descripción viene partida en varias páginas (aunque raro)
                 if ficha_actual["texto_central"]:
                     ficha_actual["texto_central"] += "\n" + texto_acumulado.strip()
                 else:
                     ficha_actual["texto_central"] = texto_acumulado.strip()
 
-        # 4. EXTRAER FOTOS (Con filtro de exclusión estricto)
-        # Verificamos si existe la frase de exclusión en TODA la página actual
-        sin_fotos_texto = "No se registraron fotografías" in texto_plano_pagina or \
-                          "No se registraron fotografias" in texto_plano_pagina or \
-                          "No se registraron fotografias" in texto_plano_pagina
+        # 4. FOTOS - LÓGICA ESTRICTA
+        sin_fotos = "No se registraron fotografías" in texto_plano_pagina or \
+                    "No se registraron fotografias" in texto_plano_pagina
 
-        # Solo buscamos fotos si NO está la frase de exclusión
-        if not sin_fotos_texto:
-            if "REGISTRO FOTOGRÁFICO" in texto_plano_pagina or len(pagina.get_images()) > 0:
+        if not sin_fotos:
+            # 1. Buscamos la posición Y del título "VIII. REGISTRO FOTOGRÁFICO"
+            y_limite_titulo = 0
+            tiene_titulo_fotos = False
+            
+            for b in bloques:
+                if "VIII. REGISTRO FOTOGRÁFICO" in b[4]:
+                    y_limite_titulo = b[3] # Usamos la coordenada inferior del bloque (bottom)
+                    tiene_titulo_fotos = True
+                    break
+            
+            # Solo procesamos imágenes si hay título o si es una página continuación (heurística simple)
+            # Pero el usuario pidió estricto "bajo VIII".
+            
+            if len(pagina.get_images()) > 0:
                 lista_imagenes = pagina.get_images(full=True)
-                
                 for img in lista_imagenes:
+                    
+                    # Chequeo geométrico
+                    bbox = pagina.get_image_bbox(img)
+                    if tiene_titulo_fotos and bbox.y0 < y_limite_titulo:
+                        continue # La imagen está visualmente ARRIBA del título -> Ignorar (ej. logos)
+                    
+                    # Extracción
                     xref = img[0]
                     base_image = doc.extract_image(xref)
                     image_bytes = base_image["image"]
                     width = base_image["width"]
                     height = base_image["height"]
 
-                    # FILTRO DE TAMAÑO: Ignorar iconos pequeños (ej. logos < 150px)
-                    if width < 150 or height < 150:
-                        continue
+                    if width < 150 or height < 150: continue
 
-                    # INTENTO DE OBTENER LEYENDA (Texto cercano visualmente)
+                    # Leyenda
                     img_rect = pagina.get_image_bbox(img)
                     leyenda_encontrada = ""
-                    
-                    # Buscamos texto muy cerca de la imagen (arriba o abajo)
                     for b in bloques:
                         b_rect = fitz.Rect(b[:4])
                         b_text = b[4].strip()
+                        dist = min(abs(b_rect.y0 - img_rect.y1), abs(img_rect.y0 - b_rect.y1))
                         
-                        # Calculamos distancia vertical
-                        distancia_vertical = min(abs(b_rect.y0 - img_rect.y1), abs(img_rect.y0 - b_rect.y1))
-                        
-                        # Si está cerca (< 70 pt) y tiene longitud razonable, y no es el título de sección
-                        if distancia_vertical < 70 and len(b_text) > 3 and "REGISTRO FOTOGRÁFICO" not in b_text:
+                        if dist < 70 and len(b_text) > 3 and "REGISTRO FOTOGRÁFICO" not in b_text:
                             leyenda_encontrada = b_text
                             break
                     
@@ -349,7 +348,6 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
                         "leyenda": leyenda_encontrada
                     })
 
-    # Guardar la última ficha al terminar el bucle del documento
     if ficha_actual["fecha"] or ficha_actual["texto_central"] or ficha_actual["fotos"]:
         fichas.append(ficha_actual)
 
@@ -619,7 +617,7 @@ def obtener_puntos_geograficos_con_foto(archivos):
 st.sidebar.title("Arqueología App")
 opcion = st.sidebar.radio("Herramientas:", [
     "Generador Word (MAP)", 
-    "Generador Word MAP (Desde PDF)", # <--- NUEVA OPCIÓN
+    "Generador Word MAP (Desde PDF)", 
     "Generador Excel (Desde Word)",
     "Generador Fichas (Desde Word)",
     "Generador KMZ (Georreferenciación)",

@@ -18,7 +18,7 @@ import locale
 try:
     import fitz  # PyMuPDF
 except ImportError:
-    st.error("Falta instalar la librería 'pymupdf'. Ejecuta: pip install pymupdf")
+    st.error("⚠️ Falta instalar la librería 'pymupdf'. Agregala a requirements.txt")
 
 # --- IMPORTACIONES PARA MAPA ---
 try:
@@ -195,7 +195,7 @@ def generar_word_con_formato(datos):
         
         celda_img = row[2]
         p_img = celda_img.paragraphs[0]
-        p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER 
+        p_img.alignment = WD_ALIGN_PARAGH.CENTER 
         
         if not item["fotos"]:
             r_sin = p_img.add_run("[Sin fotos]")
@@ -222,12 +222,16 @@ def generar_word_con_formato(datos):
     return buffer
 
 # ==========================================
-# 2.1 LÓGICA NUEVA: GENERADOR WORD MAP (DESDE PDF)
+# 2.1 LÓGICA NUEVA: GENERADOR WORD MAP (DESDE PDF) - CORREGIDO
 # ==========================================
 
 def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     """
     Extrae Fecha, Actividad y Fotos de reportes en PDF usando PyMuPDF (fitz).
+    CORECCIONES:
+    - Ordena bloques por posición vertical para evitar errores de lectura.
+    - Detecta "No se registraron fotografías" para no agregar basura.
+    - Mejora la captura de descripciones largas.
     """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -236,100 +240,116 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
         return []
 
     fichas = []
+    # Estructura temporal para acumular datos de una ficha
     ficha_actual = {
         "fecha": None,
         "texto_central": "",
         "fotos": []
     }
     
-    # Variables de estado para rastrear bloques
-    leyendo_ficha = False
-
     for pagina_idx, pagina in enumerate(doc):
-        texto_pagina = pagina.get_text("blocks")
-        texto_plano = pagina.get_text("text")
+        # 1. OBTENER BLOQUES Y ORDENARLOS VISUALMENTE (Arriba a abajo)
+        # Esto soluciona el problema donde el texto aparecía "antes" en el código PDF
+        bloques = pagina.get_text("blocks")
+        bloques.sort(key=lambda b: b[1]) # Ordenar por coordenada Y (vertical)
+        
+        texto_plano_pagina = pagina.get_text("text")
 
-        # 1. DETECTAR NUEVA FICHA (Inicio de "I. IDENTIFICACIÓN")
-        if "I. IDENTIFICACIÓN" in texto_plano or "Ficha de Monitoreo Arqueológico" in texto_plano:
-            # Si ya teníamos una ficha abierta con datos, la guardamos
+        # DETECTAR NUEVA FICHA (Inicio de "I. IDENTIFICACIÓN")
+        if "I. IDENTIFICACIÓN" in texto_plano_pagina or "Ficha de Monitoreo Arqueológico" in texto_plano_pagina:
+            # Si la ficha actual tiene datos acumulados, la guardamos antes de limpiar
             if ficha_actual["fecha"] or ficha_actual["texto_central"] or ficha_actual["fotos"]:
                 fichas.append(ficha_actual)
             
-            # Reiniciar ficha
+            # Reiniciar ficha para la nueva página/sección
             ficha_actual = {
                 "fecha": None,
                 "texto_central": "",
                 "fotos": []
             }
-            leyendo_ficha = True
 
-        # 2. EXTRAER FECHA
-        # Buscamos bloques que contengan la fecha (formato dd/mm/yyyy)
+        # 2. EXTRAER FECHA (si aún no tenemos fecha para esta ficha)
         if not ficha_actual["fecha"]:
-            # Busqueda simple por regex en todo el texto de la pagina
-            match_fecha = re.search(r"(\d{2}/\d{2}/\d{4})", texto_plano)
+            match_fecha = re.search(r"(\d{2}/\d{2}/\d{4})", texto_plano_pagina)
             if match_fecha:
                 ficha_actual["fecha"] = match_fecha.group(1)
 
-        # 3. EXTRAER ACTIVIDAD ("V. DESCRIPCIONES" o "Descripción de la Actividad")
-        # Estrategia: Buscar el bloque que dice "Descripción de la Actividad" y tomar el siguiente bloque
-        for i, bloque in enumerate(texto_pagina):
-            texto_bloque = bloque[4].strip()
-            if "Descripción de la Actividad" in texto_bloque:
-                # Intentamos tomar el bloque siguiente
-                if i + 1 < len(texto_pagina):
-                    texto_siguiente = texto_pagina[i+1][4].strip()
-                    # Evitamos headers o secciones siguientes
-                    if "VI." not in texto_siguiente and "CARACTERÍSTICAS" not in texto_siguiente:
-                        ficha_actual["texto_central"] += texto_siguiente + "\n"
-
-        # 4. EXTRAER FOTOS ("VIII. REGISTRO FOTOGRÁFICO")
-        # Si la página tiene esta sección o estamos en páginas posteriores de la misma ficha
-        if "REGISTRO FOTOGRÁFICO" in texto_plano or len(pagina.get_images()) > 0:
-            
-            # Solo procesamos imágenes si estamos seguros que es sección de fotos (heurística simple)
-            # O si la página contiene la palabra "Hallazgo" o "Vista" junto con imágenes.
-            
-            lista_imagenes = pagina.get_images(full=True)
-            
-            for img_index, img in enumerate(lista_imagenes):
-                xref = img[0]
-                base_image = doc.extract_image(xref)
-                image_bytes = base_image["image"]
-                width = base_image["width"]
-                height = base_image["height"]
-
-                # FILTRO: Ignorar logos pequeños (ej. logos empresa < 100px)
-                if width < 150 or height < 150:
+        # 3. EXTRAER ACTIVIDAD (Lógica mejorada por bloques ordenados)
+        # Buscamos el índice del bloque que dice "Descripción de la Actividad"
+        idx_titulo_actividad = -1
+        for i, b in enumerate(bloques):
+            if "Descripción de la Actividad" in b[4]:
+                idx_titulo_actividad = i
+                break
+        
+        # Si encontramos el título, capturamos todo lo que hay debajo hasta la siguiente sección
+        if idx_titulo_actividad != -1:
+            texto_acumulado = ""
+            for i in range(idx_titulo_actividad + 1, len(bloques)):
+                texto_bloque = bloques[i][4].strip()
+                
+                # CONDICIONES DE PARADA (Inicio de secciones siguientes)
+                if "VI." in texto_bloque or "CARACTERÍSTICAS" in texto_bloque or "Maquinaria" in texto_bloque:
+                    break
+                
+                # Ignorar encabezados repetidos o basura pequeña
+                if "Huso" in texto_bloque or len(texto_bloque) < 2:
                     continue
-
-                # INTENTO DE OBTENER LEYENDA (TEXTO CERCANO)
-                # Obtenemos el rectángulo de la imagen
-                img_rect = pagina.get_image_bbox(img)
-                leyenda_encontrada = ""
-                
-                # Buscamos bloques de texto que estén cerca (debajo o arriba)
-                for bloque in texto_pagina:
-                    b_rect = fitz.Rect(bloque[:4])
-                    b_text = bloque[4].strip()
                     
-                    # Si el texto está muy cerca verticalmente de la imagen
-                    distancia_vertical = min(abs(b_rect.y0 - img_rect.y1), abs(img_rect.y0 - b_rect.y1))
-                    
-                    # Si está cerca (ej. menos de 50 pt) y no es un título de sección
-                    if distancia_vertical < 60 and len(b_text) > 3 and "REGISTRO FOTOGRÁFICO" not in b_text:
-                        leyenda_encontrada = b_text
-                        # Un break aquí asocia la primera leyenda encontrada, es una heurística.
-                        # Para mejorar precisión se requeriría análisis geométrico complejo.
-                        break
-                
-                # Agregamos la foto
-                ficha_actual["fotos"].append({
-                    "blob": image_bytes,
-                    "leyenda": leyenda_encontrada
-                })
+                texto_acumulado += texto_bloque + "\n"
+            
+            if texto_acumulado:
+                # Concatenamos por si la descripción viene partida en varias páginas (aunque raro)
+                if ficha_actual["texto_central"]:
+                    ficha_actual["texto_central"] += "\n" + texto_acumulado.strip()
+                else:
+                    ficha_actual["texto_central"] = texto_acumulado.strip()
 
-    # Al finalizar el loop, guardar la última ficha si quedó pendiente
+        # 4. EXTRAER FOTOS (Con filtro de exclusión estricto)
+        # Verificamos si existe la frase de exclusión en TODA la página actual
+        sin_fotos_texto = "No se registraron fotografías" in texto_plano_pagina or \
+                          "No se registraron fotografias" in texto_plano_pagina or \
+                          "No se registraron fotografias" in texto_plano_pagina
+
+        # Solo buscamos fotos si NO está la frase de exclusión
+        if not sin_fotos_texto:
+            if "REGISTRO FOTOGRÁFICO" in texto_plano_pagina or len(pagina.get_images()) > 0:
+                lista_imagenes = pagina.get_images(full=True)
+                
+                for img in lista_imagenes:
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    width = base_image["width"]
+                    height = base_image["height"]
+
+                    # FILTRO DE TAMAÑO: Ignorar iconos pequeños (ej. logos < 150px)
+                    if width < 150 or height < 150:
+                        continue
+
+                    # INTENTO DE OBTENER LEYENDA (Texto cercano visualmente)
+                    img_rect = pagina.get_image_bbox(img)
+                    leyenda_encontrada = ""
+                    
+                    # Buscamos texto muy cerca de la imagen (arriba o abajo)
+                    for b in bloques:
+                        b_rect = fitz.Rect(b[:4])
+                        b_text = b[4].strip()
+                        
+                        # Calculamos distancia vertical
+                        distancia_vertical = min(abs(b_rect.y0 - img_rect.y1), abs(img_rect.y0 - b_rect.y1))
+                        
+                        # Si está cerca (< 70 pt) y tiene longitud razonable, y no es el título de sección
+                        if distancia_vertical < 70 and len(b_text) > 3 and "REGISTRO FOTOGRÁFICO" not in b_text:
+                            leyenda_encontrada = b_text
+                            break
+                    
+                    ficha_actual["fotos"].append({
+                        "blob": image_bytes,
+                        "leyenda": leyenda_encontrada
+                    })
+
+    # Guardar la última ficha al terminar el bucle del documento
     if ficha_actual["fecha"] or ficha_actual["texto_central"] or ficha_actual["fotos"]:
         fichas.append(ficha_actual)
 
@@ -599,7 +619,7 @@ def obtener_puntos_geograficos_con_foto(archivos):
 st.sidebar.title("Arqueología App")
 opcion = st.sidebar.radio("Herramientas:", [
     "Generador Word (MAP)", 
-    "Generador Word MAP (Desde PDF)", # <--- NUEVA OPCIÓN AGREGADA
+    "Generador Word MAP (Desde PDF)", # <--- NUEVA OPCIÓN
     "Generador Excel (Desde Word)",
     "Generador Fichas (Desde Word)",
     "Generador KMZ (Georreferenciación)",
@@ -626,7 +646,7 @@ if opcion == "Generador Word (MAP)":
             st.download_button("Descargar Word", doc_out, "Resumen_MAP.docx")
         else: st.error("No se encontraron datos.")
 
-# 1.1 Generador Word MAP (Desde PDF) - NUEVO
+# 1.1 Generador Word MAP (Desde PDF) - NUEVO Y CORREGIDO
 elif opcion == "Generador Word MAP (Desde PDF)":
     st.title("Generador Word MAP (Desde PDF)")
     st.markdown("Crea la tabla resumen mensual extrayendo datos de reportes en PDF.")

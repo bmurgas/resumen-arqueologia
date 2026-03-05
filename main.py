@@ -222,16 +222,16 @@ def generar_word_con_formato(datos):
     return buffer
 
 # ==========================================
-# 2.1 LÓGICA NUEVA: GENERADOR WORD MAP (DESDE PDF) - V3 FINAL
+# 2.1 LÓGICA NUEVA: GENERADOR WORD MAP (DESDE PDF) - V4 FINAL
 # ==========================================
 
 def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     """
     Extrae Fecha, Actividad y Fotos de reportes en PDF usando PyMuPDF (fitz).
-    CORRECCIONES V3:
-    - Captura descripción usando un rango amplio entre la sección de coordenadas (IV) y la siguiente (VI).
-    - Filtro estricto de margen superior para eliminar logos (Header).
-    - Limpieza de textos basura.
+    CORRECCIONES V4:
+    - Captura actividad basada en orden visual entre "V. DESCRIPCIONES" y "VI. CARACTERÍSTICAS".
+    - Elimina automáticamente el texto del título "Descripción de la Actividad" para dejar solo el contenido.
+    - Mantiene filtro de logo y fotos.
     """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -247,9 +247,9 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     }
     
     for pagina_idx, pagina in enumerate(doc):
-        # 1. ORDENAR BLOQUES VISUALMENTE
+        # 1. ORDENAR BLOQUES VISUALMENTE (De arriba a abajo, luego izq a der)
         bloques = pagina.get_text("blocks")
-        bloques.sort(key=lambda b: b[1]) # Ordenar por coordenada Y
+        bloques.sort(key=lambda b: (b[1], b[0])) # Ordenar por Y, luego por X
         
         texto_plano_pagina = pagina.get_text("text")
 
@@ -265,49 +265,57 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
             if match_fecha:
                 ficha_actual["fecha"] = match_fecha.group(1)
 
-        # 3. EXTRAER ACTIVIDAD - LÓGICA DE RANGO ENTRE SECCIONES
-        # Buscamos el final de la sección IV (Huso) y el inicio de la VI (Características)
+        # 3. EXTRAER ACTIVIDAD - LÓGICA SECUENCIAL V4
+        # Buscamos el bloque que inicia la sección V y el bloque que inicia la sección VI.
+        # Capturamos todo lo que está en medio y filtramos el título de la pregunta.
+        
         idx_inicio = -1
         idx_fin = -1
         
         for i, b in enumerate(bloques):
             txt = b[4].strip()
-            # Marcador de inicio: "Huso" o "IV. GEORREFERENCIACIÓN"
-            # Usamos el último que encontremos antes de la descripción
-            if "Huso" in txt or "IV. GEORREFERENCIACIÓN" in txt:
+            # Inicio: Preferimos "V. DESCRIPCIONES". Si no, "Descripción de la Actividad".
+            if "V. DESCRIPCIONES" in txt:
                 idx_inicio = i
-            # Marcador de fin: "VI. CARACTERÍSTICAS"
+            elif idx_inicio == -1 and "Descripción de la Actividad" in txt:
+                idx_inicio = i
+                
+            # Fin: "VI. CARACTERÍSTICAS"
             if "VI. CARACTERÍSTICAS" in txt:
                 idx_fin = i
                 break 
         
-        # Si encontramos el rango, extraemos todo lo que hay en medio
+        # Si encontramos el rango válido
         if idx_inicio != -1 and idx_fin != -1:
             texto_acumulado = ""
-            for i in range(idx_inicio + 1, idx_fin):
+            # Recorremos los bloques INTERMEDIOS
+            for i in range(idx_inicio, idx_fin):
+                # Saltamos el propio bloque de inicio si es solo el título
+                if i == idx_inicio and ("V. DESCRIPCIONES" in bloques[i][4] or "Descripción de la Actividad" in bloques[i][4]):
+                    continue
+
                 b_text = bloques[i][4].strip()
                 
-                # FILTRO DE BASURA Y TÍTULOS
+                # FILTROS DE LIMPIEZA
                 if "V. DESCRIPCIONES" in b_text: continue
-                if "Descripción de la Actividad" in b_text: continue
-                if len(b_text) < 5: continue # Ignora "18 G", números sueltos, etc.
+                if "Descripción de la Actividad" in b_text: continue # Filtro clave para el "celda de al lado"
+                if len(b_text) < 3: continue # Ignora basura pequeña
                 
                 texto_acumulado += b_text + "\n"
             
             if texto_acumulado:
-                # Concatenamos (aunque normalmente es un solo bloque grande)
                 if ficha_actual["texto_central"]:
                     ficha_actual["texto_central"] += "\n" + texto_acumulado.strip()
                 else:
                     ficha_actual["texto_central"] = texto_acumulado.strip()
 
-        # 4. EXTRAER FOTOS - LÓGICA DE EXCLUSIÓN Y MARGEN
+        # 4. EXTRAER FOTOS
         sin_fotos = "No se registraron fotografías" in texto_plano_pagina or \
                     "No se registraron fotografias" in texto_plano_pagina or \
                     "No se registraron fotografias" in texto_plano_pagina.lower()
 
         if not sin_fotos:
-            # Buscar posición del título VIII si existe
+            # Buscar posición del título VIII si existe para filtrar fotos "arriba" de él
             y_titulo_VIII = 0
             tiene_titulo = False
             for b in bloques:
@@ -320,35 +328,28 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
                 lista_imagenes = pagina.get_images(full=True)
                 for img in lista_imagenes:
                     
-                    # --- FILTROS DE EXCLUSIÓN ---
                     bbox = pagina.get_image_bbox(img)
                     
-                    # 1. Filtro de Logo (Margen Superior): 
-                    # Si la imagen está en los primeros 150px (Header), la ignoramos.
-                    if bbox.y0 < 150: 
-                        continue
+                    # 1. Filtro de Logo (Margen Superior 150px)
+                    if bbox.y0 < 150: continue
                     
-                    # 2. Filtro de Título VIII:
-                    # Si existe el título VIII en la página, la foto debe estar debajo.
-                    if tiene_titulo and bbox.y0 < y_titulo_VIII:
-                        continue
+                    # 2. Filtro de Título VIII (Si existe título, foto debe estar abajo)
+                    if tiene_titulo and bbox.y0 < y_titulo_VIII: continue
                         
-                    # 3. Filtro de Tamaño (Iconos pequeños)
+                    # 3. Filtro de Tamaño
                     base_image = doc.extract_image(img[0])
-                    if base_image["width"] < 150 or base_image["height"] < 150:
-                        continue
+                    if base_image["width"] < 150 or base_image["height"] < 150: continue
                     
-                    # Si pasa los filtros, agregamos
+                    # Agregar
                     image_bytes = base_image["image"]
                     
-                    # Buscar leyenda cercana
+                    # Buscar leyenda
                     leyenda_encontrada = ""
                     for b in bloques:
                         b_rect = fitz.Rect(b[:4])
                         b_text = b[4].strip()
                         dist = min(abs(b_rect.y0 - bbox.y1), abs(bbox.y0 - b_rect.y1))
                         
-                        # Leyenda debe estar cerca y no ser el título de la sección
                         if dist < 70 and len(b_text) > 5 and "REGISTRO FOTOGRÁFICO" not in b_text:
                             leyenda_encontrada = b_text
                             break
@@ -654,7 +655,7 @@ if opcion == "Generador Word (MAP)":
             st.download_button("Descargar Word", doc_out, "Resumen_MAP.docx")
         else: st.error("No se encontraron datos.")
 
-# 1.1 Generador Word MAP (Desde PDF) - NUEVO Y CORREGIDO V3
+# 1.1 Generador Word MAP (Desde PDF) - NUEVO Y CORREGIDO V4
 elif opcion == "Generador Word MAP (Desde PDF)":
     st.title("Generador Word MAP (Desde PDF)")
     st.markdown("Crea la tabla resumen mensual extrayendo datos de reportes en PDF.")

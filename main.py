@@ -195,7 +195,7 @@ def generar_word_con_formato(datos):
         
         celda_img = row[2]
         p_img = celda_img.paragraphs[0]
-        p_img.alignment = WD_ALIGN_PARAGH.CENTER 
+        p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER  # <--- CORREGIDO AQUÍ
         
         if not item["fotos"]:
             r_sin = p_img.add_run("[Sin fotos]")

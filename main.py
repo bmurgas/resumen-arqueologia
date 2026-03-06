@@ -222,16 +222,15 @@ def generar_word_con_formato(datos):
     return buffer
 
 # ==========================================
-# 2.1 LÓGICA NUEVA: GENERADOR WORD MAP (DESDE PDF) - V7 MULTIPÁGINA
+# 2.1 LÓGICA NUEVA: GENERADOR WORD MAP (DESDE PDF) - V8 FINAL (Con Hallazgos)
 # ==========================================
 
 def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     """
     Extrae Fecha, Actividad y Fotos de reportes en PDF usando PyMuPDF (fitz).
-    LÓGICA V7 (Estado Persistente):
-    - Activa captura cuando encuentra "V. DESCRIPCIONES".
-    - Mantiene captura activa a través de saltos de página.
-    - Desactiva captura cuando encuentra "VI. CARACTERÍSTICAS".
+    - Captura actividad entre Sección IV y VI (Estado Persistente).
+    - Detecta "Presencia de Hallazgos" y agrega texto resumen "Se identificaron..." o "No se identificaron...".
+    - Filtra fotos (Logo Header y Fotos vacías).
     """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -246,10 +245,10 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
         "fotos": []
     }
     
-    # ESTADO PERSISTENTE ENTRE PÁGINAS
+    # --- VARIABLES DE ESTADO Y CONFIGURACIÓN ---
     capturando_descripcion = False
     
-    # Textos a limpiar del resultado final
+    # Textos basura a limpiar de la descripción
     blacklist_clean = [
         "V. DESCRIPCIONES", "Descripción de la Actividad", 
         "Huso", "18 G", "19 H", "Datum", "WGS84",
@@ -263,12 +262,12 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
         
         texto_plano_pagina = pagina.get_text("text")
 
-        # DETECTAR NUEVA FICHA (Reset general)
+        # DETECTAR NUEVA FICHA (Reset)
         if "I. IDENTIFICACIÓN" in texto_plano_pagina or "Ficha de Monitoreo Arqueológico" in texto_plano_pagina:
             if ficha_actual["fecha"] or ficha_actual["texto_central"] or ficha_actual["fotos"]:
                 fichas.append(ficha_actual)
             ficha_actual = { "fecha": None, "texto_central": "", "fotos": [] }
-            capturando_descripcion = False # Seguridad: Resetear estado al iniciar nueva ficha
+            capturando_descripcion = False
 
         # 2. EXTRAER FECHA
         if not ficha_actual["fecha"]:
@@ -277,27 +276,24 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
                 ficha_actual["fecha"] = match_fecha.group(1)
 
         # 3. EXTRAER ACTIVIDAD (Lógica de Estado Persistente)
-        for b in bloques:
+        for i, b in enumerate(bloques):
             txt = b[4].strip()
             
-            # A. DETECTAR INICIO
-            # Si encontramos el título de inicio, activamos bandera
+            # --- LÓGICA DE CAPTURA DE TEXTO (V a VI) ---
+            # A. Inicio
             if "V. DESCRIPCIONES" in txt or "Descripción de la Actividad" in txt:
                 capturando_descripcion = True
-                continue # No guardamos el título en sí
+                continue 
 
-            # B. DETECTAR FIN
-            # Si encontramos el título de fin, apagamos bandera
+            # B. Fin
             if "VI. CARACTERÍSTICAS" in txt or "CARACTERÍSTICAS DE LA CAPA" in txt:
                 capturando_descripcion = False
-                continue
-
-            # C. CAPTURAR
+            
+            # C. Captura
             if capturando_descripcion:
-                # Filtros de limpieza
-                if len(txt) < 3: continue
+                if len(txt) < 3: continue # Ignorar basura pequeña
                 
-                # Chequeo extra de seguridad por si se coló un título
+                # Chequeo anti-título
                 es_titulo = False
                 for bad in blacklist_clean:
                     if bad in txt:
@@ -305,11 +301,34 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
                         break
                 
                 if not es_titulo:
-                    # Si ya teníamos texto, agregamos salto de línea
                     if ficha_actual["texto_central"]:
                          ficha_actual["texto_central"] += "\n" + txt
                     else:
                          ficha_actual["texto_central"] = txt
+
+            # --- LÓGICA NUEVA: DETECCIÓN DE HALLAZGOS (VII) ---
+            # Buscamos la etiqueta "Presencia de Hallazgos"
+            if "Presencia de Hallazgos" in txt:
+                texto_resultado = ""
+                
+                # Opción 1: El Sí/No está en el mismo bloque (ej. "Presencia de Hallazgos No")
+                if re.search(r"Presencia de Hallazgos\s*No", txt, re.IGNORECASE):
+                    texto_resultado = "No se identificaron hallazgos"
+                elif re.search(r"Presencia de Hallazgos\s*(Sí|Si)", txt, re.IGNORECASE):
+                    texto_resultado = "Se identificaron hallazgos"
+                
+                # Opción 2: El Sí/No está en el bloque siguiente (celda visualmente contigua)
+                elif i + 1 < len(bloques):
+                    txt_next = bloques[i+1][4].strip()
+                    if "No" == txt_next or "No" in txt_next[:3]:
+                        texto_resultado = "No se identificaron hallazgos"
+                    elif "Sí" in txt_next or "Si" in txt_next or "Sí" == txt_next:
+                        texto_resultado = "Se identificaron hallazgos"
+                
+                # Agregar el resultado al texto central (evitando duplicados en la misma ficha)
+                if texto_resultado:
+                    if texto_resultado not in ficha_actual["texto_central"]:
+                        ficha_actual["texto_central"] += "\n\n" + texto_resultado
 
         # 4. EXTRAER FOTOS
         sin_fotos = "No se registraron fotografías" in texto_plano_pagina or \
@@ -331,17 +350,12 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
                 for img in lista_imagenes:
                     bbox = pagina.get_image_bbox(img)
                     
-                    # FILTRO 1: HEADER/LOGO (<150px)
-                    if bbox.y0 < 150: continue
-                    
-                    # FILTRO 2: Debajo de Título VIII
-                    if tiene_titulo_VIII and bbox.y0 < y_titulo_VIII: continue
-
-                    # FILTRO 3: Tamaño
+                    # FILTROS
+                    if bbox.y0 < 150: continue # Logo Header
+                    if tiene_titulo_VIII and bbox.y0 < y_titulo_VIII: continue # Antes del título
                     base_image = doc.extract_image(img[0])
-                    if base_image["width"] < 150 or base_image["height"] < 150: continue
+                    if base_image["width"] < 150 or base_image["height"] < 150: continue # Iconos
                     
-                    # PROCESAR
                     image_bytes = base_image["image"]
                     leyenda_encontrada = ""
                     for b in bloques:
@@ -357,7 +371,6 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
                         "leyenda": leyenda_encontrada
                     })
 
-    # Guardar última ficha
     if ficha_actual["fecha"] or ficha_actual["texto_central"] or ficha_actual["fotos"]:
         fichas.append(ficha_actual)
 
@@ -654,7 +667,7 @@ if opcion == "Generador Word (MAP)":
             st.download_button("Descargar Word", doc_out, "Resumen_MAP.docx")
         else: st.error("No se encontraron datos.")
 
-# 1.1 Generador Word MAP (Desde PDF)
+# 1.1 Generador Word MAP (Desde PDF) - V8
 elif opcion == "Generador Word MAP (Desde PDF)":
     st.title("Generador Word MAP (Desde PDF)")
     st.markdown("Crea la tabla resumen mensual extrayendo datos de reportes en PDF.")

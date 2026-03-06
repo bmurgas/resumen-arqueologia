@@ -222,17 +222,16 @@ def generar_word_con_formato(datos):
     return buffer
 
 # ==========================================
-# 2.1 LÓGICA NUEVA: GENERADOR WORD MAP (DESDE PDF) - V6 ESTRICTA
+# 2.1 LÓGICA NUEVA: GENERADOR WORD MAP (DESDE PDF) - V7 MULTIPÁGINA
 # ==========================================
 
 def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     """
     Extrae Fecha, Actividad y Fotos de reportes en PDF usando PyMuPDF (fitz).
-    LÓGICA ESTRICTA:
-    1. Ordena bloques visualmente (Y-coordinate).
-    2. Busca el bloque "V. DESCRIPCIONES" y el bloque "VI. CARACTERÍSTICAS".
-    3. Extrae todo el texto que esté visualmente ENTRE esos dos bloques.
-    4. Elimina la frase "Descripción de la Actividad" del resultado.
+    LÓGICA V7 (Estado Persistente):
+    - Activa captura cuando encuentra "V. DESCRIPCIONES".
+    - Mantiene captura activa a través de saltos de página.
+    - Desactiva captura cuando encuentra "VI. CARACTERÍSTICAS".
     """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -247,26 +246,29 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
         "fotos": []
     }
     
-    # Marcadores de Inicio y Fin
-    MARKER_START = ["V. DESCRIPCIONES"]
-    MARKER_END = ["VI. CARACTERÍSTICAS", "VI. CARACTERISTICAS", "CARACTERÍSTICAS DE LA CAPA"]
+    # ESTADO PERSISTENTE ENTRE PÁGINAS
+    capturando_descripcion = False
     
-    # Texto a limpiar del resultado final
-    TEXTO_A_ELIMINAR = ["Descripción de la Actividad", "V. DESCRIPCIONES"]
+    # Textos a limpiar del resultado final
+    blacklist_clean = [
+        "V. DESCRIPCIONES", "Descripción de la Actividad", 
+        "Huso", "18 G", "19 H", "Datum", "WGS84",
+        "Coordenadas", "Vértice", "Este", "Norte", "Altitud"
+    ]
 
     for pagina_idx, pagina in enumerate(doc):
-        # 1. ORDENAR BLOQUES VISUALMENTE (De arriba a abajo)
-        # Esto es vital para que "entre V y VI" funcione aunque el PDF interno esté desordenado
+        # 1. ORDENAR BLOQUES VISUALMENTE
         bloques = pagina.get_text("blocks")
-        bloques.sort(key=lambda b: b[1]) 
+        bloques.sort(key=lambda b: (b[1], b[0])) 
         
         texto_plano_pagina = pagina.get_text("text")
 
-        # DETECTAR NUEVA FICHA
+        # DETECTAR NUEVA FICHA (Reset general)
         if "I. IDENTIFICACIÓN" in texto_plano_pagina or "Ficha de Monitoreo Arqueológico" in texto_plano_pagina:
             if ficha_actual["fecha"] or ficha_actual["texto_central"] or ficha_actual["fotos"]:
                 fichas.append(ficha_actual)
             ficha_actual = { "fecha": None, "texto_central": "", "fotos": [] }
+            capturando_descripcion = False # Seguridad: Resetear estado al iniciar nueva ficha
 
         # 2. EXTRAER FECHA
         if not ficha_actual["fecha"]:
@@ -274,43 +276,40 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
             if match_fecha:
                 ficha_actual["fecha"] = match_fecha.group(1)
 
-        # 3. EXTRAER ACTIVIDAD (Lógica: Entre V y VI)
-        y_inicio = -1
-        y_fin = -1
-        
-        # Paso 3.1: Encontrar las coordenadas Y de los marcadores
+        # 3. EXTRAER ACTIVIDAD (Lógica de Estado Persistente)
         for b in bloques:
             txt = b[4].strip()
-            # Buscar Inicio (V. DESCRIPCIONES)
-            if any(k in txt for k in MARKER_START):
-                y_inicio = b[3] # Usamos la parte inferior del bloque de título (bottom)
             
-            # Buscar Fin (VI. CARACTERÍSTICAS)
-            if any(k in txt for k in MARKER_END):
-                y_fin = b[1] # Usamos la parte superior del bloque de título (top)
-                break # Si encontramos el cierre, dejamos de buscar marcadores
-        
-        # Paso 3.2: Si encontramos ambos marcadores en la página, extraemos lo del medio
-        if y_inicio != -1 and y_fin != -1:
-            texto_acumulado = ""
-            for b in bloques:
-                # El bloque debe estar visualmente debajo del inicio y arriba del fin
-                # Le damos un pequeño margen de tolerancia (2px)
-                if b[1] >= (y_inicio - 2) and b[3] <= (y_fin + 2):
-                    txt_bloque = b[4].strip()
-                    
-                    # Limpieza interna
-                    for borrar in TEXTO_A_ELIMINAR:
-                        txt_bloque = txt_bloque.replace(borrar, "")
-                    
-                    if len(txt_bloque) > 2:
-                        texto_acumulado += txt_bloque + "\n"
-            
-            if texto_acumulado.strip():
-                if ficha_actual["texto_central"]:
-                    ficha_actual["texto_central"] += "\n" + texto_acumulado.strip()
-                else:
-                    ficha_actual["texto_central"] = texto_acumulado.strip()
+            # A. DETECTAR INICIO
+            # Si encontramos el título de inicio, activamos bandera
+            if "V. DESCRIPCIONES" in txt or "Descripción de la Actividad" in txt:
+                capturando_descripcion = True
+                continue # No guardamos el título en sí
+
+            # B. DETECTAR FIN
+            # Si encontramos el título de fin, apagamos bandera
+            if "VI. CARACTERÍSTICAS" in txt or "CARACTERÍSTICAS DE LA CAPA" in txt:
+                capturando_descripcion = False
+                continue
+
+            # C. CAPTURAR
+            if capturando_descripcion:
+                # Filtros de limpieza
+                if len(txt) < 3: continue
+                
+                # Chequeo extra de seguridad por si se coló un título
+                es_titulo = False
+                for bad in blacklist_clean:
+                    if bad in txt:
+                        es_titulo = True
+                        break
+                
+                if not es_titulo:
+                    # Si ya teníamos texto, agregamos salto de línea
+                    if ficha_actual["texto_central"]:
+                         ficha_actual["texto_central"] += "\n" + txt
+                    else:
+                         ficha_actual["texto_central"] = txt
 
         # 4. EXTRAER FOTOS
         sin_fotos = "No se registraron fotografías" in texto_plano_pagina or \
@@ -320,9 +319,10 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
         if not sin_fotos:
             y_titulo_VIII = 0
             tiene_titulo_VIII = False
+            
             for b in bloques:
                 if "VIII. REGISTRO FOTOGRÁFICO" in b[4]:
-                    y_titulo_VIII = b[3] 
+                    y_titulo_VIII = b[3]
                     tiene_titulo_VIII = True
                     break
 
@@ -331,15 +331,17 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
                 for img in lista_imagenes:
                     bbox = pagina.get_image_bbox(img)
                     
-                    # Filtro Logo Header (<150px)
+                    # FILTRO 1: HEADER/LOGO (<150px)
                     if bbox.y0 < 150: continue
-                    # Filtro Título VIII
+                    
+                    # FILTRO 2: Debajo de Título VIII
                     if tiene_titulo_VIII and bbox.y0 < y_titulo_VIII: continue
-                    # Filtro Tamaño
+
+                    # FILTRO 3: Tamaño
                     base_image = doc.extract_image(img[0])
                     if base_image["width"] < 150 or base_image["height"] < 150: continue
                     
-                    # Agregar
+                    # PROCESAR
                     image_bytes = base_image["image"]
                     leyenda_encontrada = ""
                     for b in bloques:
@@ -355,6 +357,7 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
                         "leyenda": leyenda_encontrada
                     })
 
+    # Guardar última ficha
     if ficha_actual["fecha"] or ficha_actual["texto_central"] or ficha_actual["fotos"]:
         fichas.append(ficha_actual)
 

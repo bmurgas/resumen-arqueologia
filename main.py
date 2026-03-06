@@ -222,15 +222,17 @@ def generar_word_con_formato(datos):
     return buffer
 
 # ==========================================
-# 2.1 LÓGICA NUEVA: GENERADOR WORD MAP (DESDE PDF) - LÓGICA REVERTIDA Y AJUSTADA
+# 2.1 LÓGICA NUEVA: GENERADOR WORD MAP (DESDE PDF) - V6 ESTRICTA
 # ==========================================
 
 def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     """
     Extrae Fecha, Actividad y Fotos de reportes en PDF usando PyMuPDF (fitz).
-    - Captura actividad entre Sección IV (Huso) y VI (Características) para ser infalible.
-    - Filtra textos basura y títulos intermedios.
-    - Filtra logo superior (Header < 150px) y respeta "No se registraron fotografías".
+    LÓGICA ESTRICTA:
+    1. Ordena bloques visualmente (Y-coordinate).
+    2. Busca el bloque "V. DESCRIPCIONES" y el bloque "VI. CARACTERÍSTICAS".
+    3. Extrae todo el texto que esté visualmente ENTRE esos dos bloques.
+    4. Elimina la frase "Descripción de la Actividad" del resultado.
     """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -245,21 +247,18 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
         "fotos": []
     }
     
-    # Palabras clave para detectar fin de seccion IV e inicio de VI
-    kw_inicio = ["Huso", "18 G", "19 H", "Datum", "WGS84"] 
-    kw_fin = ["VI. CARACTERÍSTICAS", "CARACTERÍSTICAS DE LA CAPA"]
+    # Marcadores de Inicio y Fin
+    MARKER_START = ["V. DESCRIPCIONES"]
+    MARKER_END = ["VI. CARACTERÍSTICAS", "VI. CARACTERISTICAS", "CARACTERÍSTICAS DE LA CAPA"]
     
-    # Textos a eliminar de la descripción para dejarla limpia
-    blacklist_clean = [
-        "V. DESCRIPCIONES", "Descripción de la Actividad", 
-        "Huso", "18 G", "19 H", "Datum", "WGS84",
-        "Coordenadas", "Vértice", "Este", "Norte", "Altitud"
-    ]
+    # Texto a limpiar del resultado final
+    TEXTO_A_ELIMINAR = ["Descripción de la Actividad", "V. DESCRIPCIONES"]
 
     for pagina_idx, pagina in enumerate(doc):
-        # 1. ORDENAR BLOQUES VISUALMENTE (Y luego X)
+        # 1. ORDENAR BLOQUES VISUALMENTE (De arriba a abajo)
+        # Esto es vital para que "entre V y VI" funcione aunque el PDF interno esté desordenado
         bloques = pagina.get_text("blocks")
-        bloques.sort(key=lambda b: (b[1], b[0]))
+        bloques.sort(key=lambda b: b[1]) 
         
         texto_plano_pagina = pagina.get_text("text")
 
@@ -275,40 +274,39 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
             if match_fecha:
                 ficha_actual["fecha"] = match_fecha.group(1)
 
-        # 3. EXTRAER ACTIVIDAD (Lógica de "Sandwich" entre Sección IV y VI)
-        idx_piso_iv = -1
-        idx_techo_vi = -1
+        # 3. EXTRAER ACTIVIDAD (Lógica: Entre V y VI)
+        y_inicio = -1
+        y_fin = -1
         
-        for i, b in enumerate(bloques):
+        # Paso 3.1: Encontrar las coordenadas Y de los marcadores
+        for b in bloques:
             txt = b[4].strip()
-            # Buscar el último rastro de la sección IV
-            if any(k in txt for k in kw_inicio):
-                idx_piso_iv = i
-            # Buscar el inicio de la sección VI
-            if any(k in txt for k in kw_fin):
-                idx_techo_vi = i
-                break # Encontramos el cierre, paramos
-        
-        # Si encontramos el rango válido en esta página
-        if idx_piso_iv != -1 and idx_techo_vi != -1:
-            texto_acumulado = ""
-            # Recorremos SOLO lo que está entre medio
-            for i in range(idx_piso_iv + 1, idx_techo_vi):
-                b_text = bloques[i][4].strip()
-                
-                # FILTRO DE LIMPIEZA: Si el bloque es solo un título o basura, lo saltamos
-                es_basura = False
-                if len(b_text) < 3: es_basura = True
-                
-                for bad in blacklist_clean:
-                    if bad in b_text:
-                        es_basura = True
-                        break
-                
-                if not es_basura:
-                    texto_acumulado += b_text + "\n"
+            # Buscar Inicio (V. DESCRIPCIONES)
+            if any(k in txt for k in MARKER_START):
+                y_inicio = b[3] # Usamos la parte inferior del bloque de título (bottom)
             
-            if texto_acumulado:
+            # Buscar Fin (VI. CARACTERÍSTICAS)
+            if any(k in txt for k in MARKER_END):
+                y_fin = b[1] # Usamos la parte superior del bloque de título (top)
+                break # Si encontramos el cierre, dejamos de buscar marcadores
+        
+        # Paso 3.2: Si encontramos ambos marcadores en la página, extraemos lo del medio
+        if y_inicio != -1 and y_fin != -1:
+            texto_acumulado = ""
+            for b in bloques:
+                # El bloque debe estar visualmente debajo del inicio y arriba del fin
+                # Le damos un pequeño margen de tolerancia (2px)
+                if b[1] >= (y_inicio - 2) and b[3] <= (y_fin + 2):
+                    txt_bloque = b[4].strip()
+                    
+                    # Limpieza interna
+                    for borrar in TEXTO_A_ELIMINAR:
+                        txt_bloque = txt_bloque.replace(borrar, "")
+                    
+                    if len(txt_bloque) > 2:
+                        texto_acumulado += txt_bloque + "\n"
+            
+            if texto_acumulado.strip():
                 if ficha_actual["texto_central"]:
                     ficha_actual["texto_central"] += "\n" + texto_acumulado.strip()
                 else:
@@ -320,45 +318,34 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
                     "No se registraron fotografias" in texto_plano_pagina.lower()
 
         if not sin_fotos:
-            # Detectar posición del título VIII para filtrar fotos encima
             y_titulo_VIII = 0
             tiene_titulo_VIII = False
-            
             for b in bloques:
                 if "VIII. REGISTRO FOTOGRÁFICO" in b[4]:
-                    y_titulo_VIII = b[3] # Coordenada inferior del titulo
+                    y_titulo_VIII = b[3] 
                     tiene_titulo_VIII = True
                     break
 
             if len(pagina.get_images()) > 0:
                 lista_imagenes = pagina.get_images(full=True)
                 for img in lista_imagenes:
-                    
                     bbox = pagina.get_image_bbox(img)
                     
-                    # FILTRO 1: HEADER/LOGO (Los primeros 150px de la hoja son sagrados, borrar todo ahí)
-                    if bbox.y0 < 150: 
-                        continue
-                    
-                    # FILTRO 2: Si hay título VIII, la foto debe estar visualmente debajo
-                    if tiene_titulo_VIII and bbox.y0 < y_titulo_VIII:
-                        continue
-
-                    # FILTRO 3: Tamaño mínimo
+                    # Filtro Logo Header (<150px)
+                    if bbox.y0 < 150: continue
+                    # Filtro Título VIII
+                    if tiene_titulo_VIII and bbox.y0 < y_titulo_VIII: continue
+                    # Filtro Tamaño
                     base_image = doc.extract_image(img[0])
-                    if base_image["width"] < 150 or base_image["height"] < 150: 
-                        continue
+                    if base_image["width"] < 150 or base_image["height"] < 150: continue
                     
-                    # PROCESAR
+                    # Agregar
                     image_bytes = base_image["image"]
-                    
-                    # Buscar leyenda
                     leyenda_encontrada = ""
                     for b in bloques:
                         b_rect = fitz.Rect(b[:4])
                         b_text = b[4].strip()
                         dist = min(abs(b_rect.y0 - bbox.y1), abs(bbox.y0 - b_rect.y1))
-                        
                         if dist < 70 and len(b_text) > 5 and "REGISTRO FOTOGRÁFICO" not in b_text:
                             leyenda_encontrada = b_text
                             break

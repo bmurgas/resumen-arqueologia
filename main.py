@@ -35,7 +35,6 @@ st.set_page_config(page_title="Arqueología - Suite Word", layout="wide")
 # ==========================================
 
 def obtener_imagenes_con_id(elemento_xml, doc_relacionado):
-    """Extrae imágenes incrustadas en una celda/párrafo de Word."""
     resultados = [] 
     blips = elemento_xml.xpath('.//a:blip')
     for blip in blips:
@@ -240,7 +239,6 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     }
     
     capturando_descripcion = False
-    
     blacklist_clean = [
         "V. DESCRripciones", "V. DESCRIPCIONES", "Descripción de la Actividad", 
         "Huso", "18 G", "19 H", "Datum", "WGS84",
@@ -325,7 +323,6 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
                 lista_imagenes = pagina.get_images(full=True)
                 for img in lista_imagenes:
                     bbox = pagina.get_image_bbox(img)
-                    
                     if bbox.y0 < 150: continue 
                     if tiene_titulo_VIII and bbox.y0 < y_titulo_VIII: continue 
                     base_image = doc.extract_image(img[0])
@@ -352,7 +349,7 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     return fichas
 
 # ==========================================
-# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL) - SOLUCIÓN COLUMNAS
+# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL) - VISIÓN ESPACIAL ESTRICTA
 # ==========================================
 
 def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
@@ -365,80 +362,106 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
     fichas = []
 
     for pagina in doc:
-        bloques = pagina.get_text("blocks")
-        bloques = [b for b in bloques if b[4].strip()]
-        if not bloques: continue
+        # Extraemos el diccionario visual que nos da las coordenadas (bbox) de cada línea
+        dict_data = pagina.get_text("dict")
+        elementos = []
         
-        width = pagina.rect.width
-        
-        # SOLUCIÓN DE AISLAMIENTO: Dividimos la hoja a la mitad. 
-        # Leemos todo el lado izquierdo, y luego el lado derecho.
-        # Esto evita cruzar "Material" con "Superficie".
-        bloques.sort(key=lambda b: (1 if b[0] > width/2 else 0, b[1]))
-        
-        lineas_puras = []
-        for b in bloques:
-            for l in b[4].split('\n'):
-                l = l.strip()
-                if l:
-                    lineas_puras.append(l)
-        
+        for b in dict_data.get("blocks", []):
+            if b.get("type") == 0:  # Bloque de texto
+                for l in b.get("lines", []):
+                    line_text = ""
+                    x0_min, y0_min = 9999, 9999
+                    x1_max, y1_max = -1, -1
+                    
+                    for s in l.get("spans", []):
+                        txt = s.get("text", "").strip()
+                        if txt:
+                            line_text += txt + " "
+                            sx0, sy0, sx1, sy1 = s.get("bbox")
+                            x0_min = min(x0_min, sx0)
+                            y0_min = min(y0_min, sy0)
+                            x1_max = max(x1_max, sx1)
+                            y1_max = max(y1_max, sy1)
+                    
+                    line_text = line_text.strip()
+                    if line_text:
+                        elementos.append({
+                            "text": line_text,
+                            "x0": x0_min, "y0": y0_min,
+                            "x1": x1_max, "y1": y1_max
+                        })
+                        
+        if not elementos: continue
+
         ficha = {
             "Responsable": "", "Sitio": "", "Hallazgo Previsto": "",
             "Cuadrante": "", "Dimensión": "", "Fecha": "",
             "UTM Norte": "", "UTM Este": "", "Material": "", "Superficie": ""
         }
+        
+        # EL MOTOR ESPACIAL: Busca la caja de la etiqueta y luego mira qué hay arriba o abajo
+        def buscar_visual(label, direccion="abajo"):
+            target_elem = None
+            
+            # Buscar coincidencia ESTRICTA de la etiqueta (ignorando mayúsculas)
+            for el in elementos:
+                if el["text"].lower() == label.lower() or el["text"].lower() == label.lower() + ":":
+                    target_elem = el
+                    break
+            
+            if not target_elem: return ""
+            
+            tx0, ty0, tx1, ty1 = target_elem["x0"], target_elem["y0"], target_elem["x1"], target_elem["y1"]
+            candidatos = []
+            
+            for el in elementos:
+                if el == target_elem: continue
+                ex0, ey0, ex1, ey1 = el["x0"], el["y0"], el["x1"], el["y1"]
+                
+                # CONDICIÓN DE ORO: Tienen que compartir el espacio horizontal (misma columna visual)
+                # Si las cajas se superponen en el eje X, significa que están alineadas en la misma columna.
+                solapamiento_horizontal = max(0, min(tx1, ex1) - max(tx0, ex0))
+                
+                # También aceptamos si los bordes izquierdos están muy cerca (tolerancia de 50 píxeles)
+                si_comparte_columna = solapamiento_horizontal > 0 or abs(ex0 - tx0) < 50
+                
+                if si_comparte_columna:
+                    if direccion == "abajo" and ey0 >= ty0 - 5:
+                        candidatos.append((ey0, el["text"]))
+                    elif direccion == "arriba" and ey1 <= ty1 + 5:
+                        candidatos.append((ey1, el["text"]))
+            
+            if candidatos:
+                # Ordenamos los candidatos según su cercanía vertical a la etiqueta
+                if direccion == "abajo":
+                    candidatos.sort(key=lambda x: x[0]) # El Y0 más pequeño (el que está justo abajo)
+                else:
+                    candidatos.sort(key=lambda x: x[0], reverse=True) # El Y1 más grande (el que está justo arriba)
+                return candidatos[0][1]
+            return ""
 
-        # Buscamos con coincidencias exactas para no tomar fragmentos de títulos largos
-        for i, linea in enumerate(lineas_puras):
-            lin_lower = linea.lower()
-            
-            if lin_lower == "responsable" or lin_lower == "responsable:":
-                if i + 1 < len(lineas_puras): ficha["Responsable"] = lineas_puras[i+1]
-            
-            elif lin_lower == "sitio" or lin_lower == "sitio:":
-                if i + 1 < len(lineas_puras): ficha["Sitio"] = lineas_puras[i+1]
-            
-            # El ID está siempre justo arriba de la palabra "Hallazgo Previsto"
-            elif lin_lower == "hallazgo previsto" or lin_lower == "hallazgo previsto:":
-                if i - 1 >= 0: ficha["Hallazgo Previsto"] = lineas_puras[i-1]
-            
-            elif lin_lower == "cuadrante" or lin_lower == "cuadrante:":
-                if i + 1 < len(lineas_puras): ficha["Cuadrante"] = lineas_puras[i+1]
-            
-            elif lin_lower == "dimensión" or lin_lower == "dimension" or lin_lower == "dimensión:":
-                if i + 1 < len(lineas_puras): ficha["Dimensión"] = lineas_puras[i+1]
-            
-            elif lin_lower == "fecha" or lin_lower == "fecha:":
-                if i + 1 < len(lineas_puras): ficha["Fecha"] = lineas_puras[i+1]
-            
-            elif lin_lower == "material" or lin_lower == "material:":
-                if i + 1 < len(lineas_puras): ficha["Material"] = lineas_puras[i+1]
-            
-            elif lin_lower == "superficie" or lin_lower == "superficie:":
-                if i + 1 < len(lineas_puras): ficha["Superficie"] = lineas_puras[i+1]
-            
-            elif lin_lower.startswith("utm norte"):
-                val = linea[len("UTM Norte"):].strip()
-                val = re.sub(r'^[:\-\s]+', '', val)
-                if val:
-                    ficha["UTM Norte"] = val
-                elif i + 1 < len(lineas_puras):
-                    ficha["UTM Norte"] = lineas_puras[i+1]
-                    
-            elif lin_lower.startswith("utm este"):
-                val = linea[len("UTM Este"):].strip()
-                val = re.sub(r'^[:\-\s]+', '', val)
-                if val:
-                    ficha["UTM Este"] = val
-                elif i + 1 < len(lineas_puras):
-                    ficha["UTM Este"] = lineas_puras[i+1]
+        # Función especial para las UTM, ya que a veces vienen pegadas en la misma caja (Ej: "UTM Norte 5538910")
+        def buscar_utm(label):
+            for el in elementos:
+                if el["text"].lower().startswith(label.lower()):
+                    val = el["text"][len(label):].strip()
+                    val = re.sub(r'^[:\-\s]+', '', val)
+                    if val: return val
+            # Si no estaba pegado en la misma línea, busca la caja de abajo
+            return buscar_visual(label, "abajo")
 
-        # Respaldo si no encontró el ID del hallazgo
-        if not ficha["Hallazgo Previsto"]:
-            texto_total = "\n".join(lineas_puras)
-            m = re.search(r"(HLU_HP_\d+|HP_\d+)", texto_total)
-            if m: ficha["Hallazgo Previsto"] = m.group(1)
+        # EJECUCIÓN (A prueba de balas)
+        ficha["Responsable"] = buscar_visual("Responsable", "abajo")
+        ficha["Sitio"] = buscar_visual("Sitio", "abajo")
+        ficha["Hallazgo Previsto"] = buscar_visual("Hallazgo Previsto", "arriba") # Se busca hacia ARRIBA
+        ficha["Cuadrante"] = buscar_visual("Cuadrante", "abajo")
+        ficha["Dimensión"] = buscar_visual("Dimensión", "abajo")
+        if not ficha["Dimensión"]: ficha["Dimensión"] = buscar_visual("Dimension", "abajo") # Por si no tiene tilde
+        ficha["Fecha"] = buscar_visual("Fecha", "abajo")
+        ficha["Material"] = buscar_visual("Material", "abajo")
+        ficha["Superficie"] = buscar_visual("Superficie", "abajo")
+        ficha["UTM Norte"] = buscar_utm("UTM Norte")
+        ficha["UTM Este"] = buscar_utm("UTM Este")
 
         if ficha["Sitio"] or ficha["Responsable"]:
             fichas.append(ficha)
@@ -646,7 +669,7 @@ def obtener_puntos_geograficos_con_foto(archivos):
                 for r_idx, fila in enumerate(tabla.rows):
                     for idx, celda in enumerate(fila.cells):
                         txt = celda.text.strip()
-                        if "ID Sitio" in txt and idx+1 < len(fila.cells): id_sitio = fila.cells[idx+1].text.strip()
+                        if "ID Sitio" in txt and idx+1 < len(fila.cells): id_sitio = cells[idx+1].text.strip()
                         if "Coord. Central Norte" in txt and idx+1 < len(fila.cells): norte = fila.cells[idx+1].text.strip()
                         if "Coord. Central Este" in txt and idx+1 < len(fila.cells): este = fila.cells[idx+1].text.strip()
                         if "Categoría" in txt and idx+1 < len(fila.cells): desc = fila.cells[idx+1].text.strip()

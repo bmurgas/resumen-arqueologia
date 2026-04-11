@@ -226,12 +226,6 @@ def generar_word_con_formato(datos):
 # ==========================================
 
 def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
-    """
-    Extrae Fecha, Actividad y Fotos de reportes en PDF usando PyMuPDF (fitz).
-    - Captura actividad entre Sección IV y VI (Estado Persistente).
-    - Detecta "Presencia de Hallazgos" y agrega texto resumen "Se identificaron..." o "No se identificaron...".
-    - Filtra fotos (Logo Header y Fotos vacías).
-    """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     except Exception as e:
@@ -245,55 +239,43 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
         "fotos": []
     }
     
-    # --- VARIABLES DE ESTADO Y CONFIGURACIÓN ---
     capturando_descripcion = False
     
-    # Textos basura a limpiar de la descripción
     blacklist_clean = [
-        "V. DESCRIPCIONES", "Descripción de la Actividad", 
+        "V. DESCRripciones", "V. DESCRIPCIONES", "Descripción de la Actividad", 
         "Huso", "18 G", "19 H", "Datum", "WGS84",
         "Coordenadas", "Vértice", "Este", "Norte", "Altitud"
     ]
 
     for pagina_idx, pagina in enumerate(doc):
-        # 1. ORDENAR BLOQUES VISUALMENTE
         bloques = pagina.get_text("blocks")
         bloques.sort(key=lambda b: (b[1], b[0])) 
         
         texto_plano_pagina = pagina.get_text("text")
 
-        # DETECTAR NUEVA FICHA (Reset)
         if "I. IDENTIFICACIÓN" in texto_plano_pagina or "Ficha de Monitoreo Arqueológico" in texto_plano_pagina:
             if ficha_actual["fecha"] or ficha_actual["texto_central"] or ficha_actual["fotos"]:
                 fichas.append(ficha_actual)
             ficha_actual = { "fecha": None, "texto_central": "", "fotos": [] }
             capturando_descripcion = False
 
-        # 2. EXTRAER FECHA
         if not ficha_actual["fecha"]:
             match_fecha = re.search(r"(\d{2}/\d{2}/\d{4})", texto_plano_pagina)
             if match_fecha:
                 ficha_actual["fecha"] = match_fecha.group(1)
 
-        # 3. EXTRAER ACTIVIDAD (Lógica de Estado Persistente)
         for i, b in enumerate(bloques):
             txt = b[4].strip()
             
-            # --- LÓGICA DE CAPTURA DE TEXTO (V a VI) ---
-            # A. Inicio
             if "V. DESCRIPCIONES" in txt or "Descripción de la Actividad" in txt:
                 capturando_descripcion = True
                 continue 
 
-            # B. Fin
             if "VI. CARACTERÍSTICAS" in txt or "CARACTERÍSTICAS DE LA CAPA" in txt:
                 capturando_descripcion = False
             
-            # C. Captura
             if capturando_descripcion:
-                if len(txt) < 3: continue # Ignorar basura pequeña
-                
-                # Chequeo anti-título
+                if len(txt) < 3: continue 
                 es_titulo = False
                 for bad in blacklist_clean:
                     if bad in txt:
@@ -306,17 +288,14 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
                     else:
                          ficha_actual["texto_central"] = txt
 
-            # --- LÓGICA DE DETECCIÓN DE HALLAZGOS (VII) ---
             if "Presencia de Hallazgos" in txt:
                 texto_resultado = ""
                 
-                # Opción 1: El Sí/No está en el mismo bloque
                 if re.search(r"Presencia de Hallazgos\s*No", txt, re.IGNORECASE):
                     texto_resultado = "No se identificaron hallazgos"
                 elif re.search(r"Presencia de Hallazgos\s*(Sí|Si)", txt, re.IGNORECASE):
                     texto_resultado = "Se identificaron hallazgos"
                 
-                # Opción 2: El Sí/No está en el bloque siguiente
                 elif i + 1 < len(bloques):
                     txt_next = bloques[i+1][4].strip()
                     if "No" == txt_next or "No" in txt_next[:3]:
@@ -324,12 +303,10 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
                     elif "Sí" in txt_next or "Si" in txt_next or "Sí" == txt_next:
                         texto_resultado = "Se identificaron hallazgos"
                 
-                # Agregar el resultado al texto central
                 if texto_resultado:
                     if texto_resultado not in ficha_actual["texto_central"]:
                         ficha_actual["texto_central"] += "\n\n" + texto_resultado
 
-        # 4. EXTRAER FOTOS
         sin_fotos = "No se registraron fotografías" in texto_plano_pagina or \
                     "No se registraron fotografias" in texto_plano_pagina or \
                     "No se registraron fotografias" in texto_plano_pagina.lower()
@@ -388,12 +365,10 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
     fichas = []
     texto_completo = ""
     
-    # Extraemos el texto de todo el documento, ordenado visualmente para mantener coherencia
+    # Extraemos el texto respetando los bloques nativos del PDF sin forzar el orden Y
+    # Esto mantiene intactas las columnas y evita cruzar datos de la izquierda con la derecha
     for pagina in doc:
-        bloques = pagina.get_text("blocks")
-        bloques.sort(key=lambda b: (b[1], b[0]))
-        for b in bloques:
-            texto_completo += b[4] + "\n"
+        texto_completo += pagina.get_text("text") + "\n"
 
     # Dividimos el texto gigante por cada nueva ficha que empiece
     fragmentos_fichas = texto_completo.split("Ficha de Recolección Superficial")
@@ -420,7 +395,7 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
                 ficha["Sitio"] = lineas[i+1]
             
             elif linea == "Hallazgo Previsto" and i - 1 >= 0:
-                # En el formato PDF, el valor (ej. HLU_HP_117) está justo ARRIBA de la etiqueta
+                # Al no mezclar las columnas, la información de "HLU_HP_X" queda exactamente una línea arriba
                 ficha["Hallazgo Previsto"] = lineas[i-1]
             
             elif linea == "Cuadrante" and i + 1 < len(lineas):
@@ -433,21 +408,28 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
                 ficha["Fecha"] = lineas[i+1]
             
             elif linea.startswith("UTM Norte"):
-                # A veces viene en la misma línea "UTM Norte 5538910"
                 val = linea.replace("UTM Norte", "").strip()
                 if val:
                     ficha["UTM Norte"] = val
                 elif i + 1 < len(lineas):
                     ficha["UTM Norte"] = lineas[i+1]
             
-            elif linea == "UTM Este" and i + 1 < len(lineas):
-                ficha["UTM Este"] = lineas[i+1]
+            elif linea.startswith("UTM Este"):
+                val = linea.replace("UTM Este", "").strip()
+                if val:
+                    ficha["UTM Este"] = val
+                elif i + 1 < len(lineas):
+                    ficha["UTM Este"] = lineas[i+1]
             
             elif linea == "Material" and i + 1 < len(lineas):
                 ficha["Material"] = lineas[i+1]
             
-            elif linea == "Superficie" and i + 1 < len(lineas):
-                ficha["Superficie"] = lineas[i+1]
+            elif linea.startswith("Superficie"):
+                val = linea.replace("Superficie", "").strip()
+                if val:
+                    ficha["Superficie"] = val
+                elif i + 1 < len(lineas):
+                    ficha["Superficie"] = lineas[i+1]
 
         fichas.append(ficha)
 
@@ -465,27 +447,38 @@ def procesar_word_a_excel(archivo_bytes, nombre_archivo):
         return []
 
     registros = []
+    
     for tabla in doc.tables:
-        dato = {"Fecha": "", "Descripción de la actividad": "", "Descripción estratigráfica": ""}
+        dato = {
+            "Fecha": "",
+            "Descripción de la actividad": "",
+            "Descripción estratigráfica": ""
+        }
         encontrado = False 
+        
         for fila in tabla.rows:
             for i, celda in enumerate(fila.cells):
                 texto_celda = celda.text.strip()
+                
                 if "Fecha" in texto_celda and len(texto_celda) < 20:
                     if i + 1 < len(fila.cells):
                         dato["Fecha"] = fila.cells[i+1].text.strip()
                         encontrado = True
+                
                 if "Descripción de la actividad" in texto_celda:
                     if i + 1 < len(fila.cells):
                         dato["Descripción de la actividad"] = fila.cells[i+1].text.strip()
                         encontrado = True
+
                 if "Descripción estratigráfica" in texto_celda:
                     if i + 1 < len(fila.cells):
                         dato["Descripción estratigráfica"] = fila.cells[i+1].text.strip()
                         encontrado = True
+
         if encontrado:
             if dato["Fecha"] or dato["Descripción de la actividad"] or dato["Descripción estratigráfica"]:
                 registros.append(dato)
+                
     return registros
 
 # ==========================================
@@ -648,9 +641,6 @@ def crear_kml_texto(puntos):
     return kml_header + kml_body + kml_footer
 
 def obtener_puntos_geograficos_con_foto(archivos):
-    """
-    Extrae coords y FOTOS para el mapa interactivo.
-    """
     try:
         transformer = Transformer.from_crs("epsg:32718", "epsg:4326", always_xy=True)
     except:
@@ -696,7 +686,7 @@ opcion = st.sidebar.radio("Herramientas:", [
     "Generador Word (MAP)", 
     "Generador Word MAP (Desde PDF)", 
     "Generador Excel (Desde Word)",
-    "Generador Excel (Recolección Superficial)", # <--- NUEVA OPCIÓN
+    "Generador Excel (Recolección Superficial)",
     "Generador Fichas (Desde Word)",
     "Generador KMZ (Georreferenciación)",
     "Visor de Mapa Interactivo"
@@ -765,40 +755,30 @@ elif opcion == "Generador Excel (Desde Word)":
             st.download_button("⬇️ Descargar Excel", buffer.getvalue(), "Resumen_Word_Excel.xlsx")
         else: st.error("No se encontraron datos.")
 
-# 2.2 Generador Excel (Recolección Superficial) - NUEVO MÓDULO
+# 2.2 Generador Excel (Recolección Superficial)
 elif opcion == "Generador Excel (Recolección Superficial)":
     st.title("Generador Excel (Recolección Superficial)")
     st.markdown("Extrae datos específicos de las Fichas de Recolección Superficial en PDF para exportarlos a Excel.")
     st.info("Columnas: Responsable, Sitio, Hallazgo Previsto, Cuadrante, Dimensión, Fecha, UTM Norte, UTM Este, Material, Superficie.")
-    
     archivos = st.file_uploader("Subir Fichas PDF (.pdf)", accept_multiple_files=True, key="pdf_recoleccion_up")
-    
     if archivos and st.button("Generar Base de Datos Excel"):
         todas_las_fichas = []
         bar = st.progress(0)
-        
-        # Procesamos cada PDF subido
         for i, a in enumerate(archivos):
             fichas_extraidas = procesar_pdf_recoleccion_superficial(a.read(), a.name)
             todas_las_fichas.extend(fichas_extraidas)
             bar.progress((i+1)/len(archivos))
-            
         if todas_las_fichas:
-            # Convertir a DataFrame de Pandas con el orden de columnas exacto
             columnas_ordenadas = [
                 "Responsable", "Sitio", "Hallazgo Previsto", "Cuadrante", 
                 "Dimensión", "Fecha", "UTM Norte", "UTM Este", "Material", "Superficie"
             ]
             df = pd.DataFrame(todas_las_fichas)[columnas_ordenadas]
-            
             st.success(f"✅ Se extrajeron {len(df)} registros correctamente.")
-            st.dataframe(df) # Mostrar preview en pantalla
-            
-            # Crear archivo Excel en memoria para descargar
+            st.dataframe(df)
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                 df.to_excel(writer, index=False, sheet_name="Hallazgos Previstos")
-            
             st.download_button(
                 label="⬇️ Descargar Excel", 
                 data=buffer.getvalue(), 

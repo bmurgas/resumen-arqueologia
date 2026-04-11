@@ -306,18 +306,17 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
                     else:
                          ficha_actual["texto_central"] = txt
 
-            # --- LÓGICA NUEVA: DETECCIÓN DE HALLAZGOS (VII) ---
-            # Buscamos la etiqueta "Presencia de Hallazgos"
+            # --- LÓGICA DE DETECCIÓN DE HALLAZGOS (VII) ---
             if "Presencia de Hallazgos" in txt:
                 texto_resultado = ""
                 
-                # Opción 1: El Sí/No está en el mismo bloque (ej. "Presencia de Hallazgos No")
+                # Opción 1: El Sí/No está en el mismo bloque
                 if re.search(r"Presencia de Hallazgos\s*No", txt, re.IGNORECASE):
                     texto_resultado = "No se identificaron hallazgos"
                 elif re.search(r"Presencia de Hallazgos\s*(Sí|Si)", txt, re.IGNORECASE):
                     texto_resultado = "Se identificaron hallazgos"
                 
-                # Opción 2: El Sí/No está en el bloque siguiente (celda visualmente contigua)
+                # Opción 2: El Sí/No está en el bloque siguiente
                 elif i + 1 < len(bloques):
                     txt_next = bloques[i+1][4].strip()
                     if "No" == txt_next or "No" in txt_next[:3]:
@@ -325,7 +324,7 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
                     elif "Sí" in txt_next or "Si" in txt_next or "Sí" == txt_next:
                         texto_resultado = "Se identificaron hallazgos"
                 
-                # Agregar el resultado al texto central (evitando duplicados en la misma ficha)
+                # Agregar el resultado al texto central
                 if texto_resultado:
                     if texto_resultado not in ficha_actual["texto_central"]:
                         ficha_actual["texto_central"] += "\n\n" + texto_resultado
@@ -350,11 +349,10 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
                 for img in lista_imagenes:
                     bbox = pagina.get_image_bbox(img)
                     
-                    # FILTROS
-                    if bbox.y0 < 150: continue # Logo Header
-                    if tiene_titulo_VIII and bbox.y0 < y_titulo_VIII: continue # Antes del título
+                    if bbox.y0 < 150: continue 
+                    if tiene_titulo_VIII and bbox.y0 < y_titulo_VIII: continue 
                     base_image = doc.extract_image(img[0])
-                    if base_image["width"] < 150 or base_image["height"] < 150: continue # Iconos
+                    if base_image["width"] < 150 or base_image["height"] < 150: continue 
                     
                     image_bytes = base_image["image"]
                     leyenda_encontrada = ""
@@ -377,6 +375,85 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     return fichas
 
 # ==========================================
+# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL) DESDE PDF
+# ==========================================
+
+def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as e:
+        st.error(f"Error abriendo PDF {nombre_archivo}: {e}")
+        return []
+
+    fichas = []
+    texto_completo = ""
+    
+    # Extraemos el texto de todo el documento, ordenado visualmente para mantener coherencia
+    for pagina in doc:
+        bloques = pagina.get_text("blocks")
+        bloques.sort(key=lambda b: (b[1], b[0]))
+        for b in bloques:
+            texto_completo += b[4] + "\n"
+
+    # Dividimos el texto gigante por cada nueva ficha que empiece
+    fragmentos_fichas = texto_completo.split("Ficha de Recolección Superficial")
+
+    for fragmento in fragmentos_fichas:
+        if len(fragmento.strip()) < 50:
+            continue # Ignorar pedazos vacíos generados por el split
+
+        # Limpiamos y preparamos las líneas
+        lineas = [linea.strip() for linea in fragmento.split('\n') if linea.strip()]
+
+        ficha = {
+            "Responsable": "", "Sitio": "", "Hallazgo Previsto": "",
+            "Cuadrante": "", "Dimensión": "", "Fecha": "",
+            "UTM Norte": "", "UTM Este": "", "Material": "", "Superficie": ""
+        }
+
+        # Buscamos línea por línea los valores
+        for i, linea in enumerate(lineas):
+            if linea == "Responsable" and i + 1 < len(lineas):
+                ficha["Responsable"] = lineas[i+1]
+            
+            elif linea == "Sitio" and i + 1 < len(lineas):
+                ficha["Sitio"] = lineas[i+1]
+            
+            elif linea == "Hallazgo Previsto" and i - 1 >= 0:
+                # En el formato PDF, el valor (ej. HLU_HP_117) está justo ARRIBA de la etiqueta
+                ficha["Hallazgo Previsto"] = lineas[i-1]
+            
+            elif linea == "Cuadrante" and i + 1 < len(lineas):
+                ficha["Cuadrante"] = lineas[i+1]
+            
+            elif linea == "Dimensión" and i + 1 < len(lineas):
+                ficha["Dimensión"] = lineas[i+1]
+            
+            elif linea == "Fecha" and i + 1 < len(lineas):
+                ficha["Fecha"] = lineas[i+1]
+            
+            elif linea.startswith("UTM Norte"):
+                # A veces viene en la misma línea "UTM Norte 5538910"
+                val = linea.replace("UTM Norte", "").strip()
+                if val:
+                    ficha["UTM Norte"] = val
+                elif i + 1 < len(lineas):
+                    ficha["UTM Norte"] = lineas[i+1]
+            
+            elif linea == "UTM Este" and i + 1 < len(lineas):
+                ficha["UTM Este"] = lineas[i+1]
+            
+            elif linea == "Material" and i + 1 < len(lineas):
+                ficha["Material"] = lineas[i+1]
+            
+            elif linea == "Superficie" and i + 1 < len(lineas):
+                ficha["Superficie"] = lineas[i+1]
+
+        fichas.append(ficha)
+
+    return fichas
+
+# ==========================================
 # 3. LÓGICA: GENERADOR EXCEL (DESDE WORD)
 # ==========================================
 
@@ -388,38 +465,27 @@ def procesar_word_a_excel(archivo_bytes, nombre_archivo):
         return []
 
     registros = []
-    
     for tabla in doc.tables:
-        dato = {
-            "Fecha": "",
-            "Descripción de la actividad": "",
-            "Descripción estratigráfica": ""
-        }
+        dato = {"Fecha": "", "Descripción de la actividad": "", "Descripción estratigráfica": ""}
         encontrado = False 
-        
         for fila in tabla.rows:
             for i, celda in enumerate(fila.cells):
                 texto_celda = celda.text.strip()
-                
                 if "Fecha" in texto_celda and len(texto_celda) < 20:
                     if i + 1 < len(fila.cells):
                         dato["Fecha"] = fila.cells[i+1].text.strip()
                         encontrado = True
-                
                 if "Descripción de la actividad" in texto_celda:
                     if i + 1 < len(fila.cells):
                         dato["Descripción de la actividad"] = fila.cells[i+1].text.strip()
                         encontrado = True
-
                 if "Descripción estratigráfica" in texto_celda:
                     if i + 1 < len(fila.cells):
                         dato["Descripción estratigráfica"] = fila.cells[i+1].text.strip()
                         encontrado = True
-
         if encontrado:
             if dato["Fecha"] or dato["Descripción de la actividad"] or dato["Descripción estratigráfica"]:
                 registros.append(dato)
-                
     return registros
 
 # ==========================================
@@ -591,46 +657,34 @@ def obtener_puntos_geograficos_con_foto(archivos):
         return None
 
     puntos_acumulados = []
-    
     for a in archivos:
         try:
             doc = Document(io.BytesIO(a.read()))
             for tabla in doc.tables:
                 id_sitio, norte, este, desc = "", "", "", ""
                 foto_bytes = None
-                
                 for r_idx, fila in enumerate(tabla.rows):
                     for idx, celda in enumerate(fila.cells):
                         txt = celda.text.strip()
-                        
-                        # Datos
                         if "ID Sitio" in txt and idx+1 < len(fila.cells): id_sitio = fila.cells[idx+1].text.strip()
                         if "Coord. Central Norte" in txt and idx+1 < len(fila.cells): norte = fila.cells[idx+1].text.strip()
                         if "Coord. Central Este" in txt and idx+1 < len(fila.cells): este = fila.cells[idx+1].text.strip()
                         if "Categoría" in txt and idx+1 < len(fila.cells): desc = fila.cells[idx+1].text.strip()
-                        
-                        # Foto (para el mapa)
                         if "Fotografía detalle" in txt and r_idx > 0:
                             celda_arriba = tabla.rows[r_idx - 1].cells[idx]
                             imgs = obtener_imagenes_con_id(celda_arriba._element, doc)
                             if imgs:
                                 foto_bytes = imgs[0][1]
-                
                 if id_sitio and norte and este:
                     n = limpiar_coordenada(norte)
                     e = limpiar_coordenada(este)
                     if n and e:
                         lon, lat = transformer.transform(e, n)
                         puntos_acumulados.append({
-                            "nombre": id_sitio, 
-                            "desc": desc, 
-                            "lat": lat, 
-                            "lon": lon,
-                            "foto": foto_bytes
+                            "nombre": id_sitio, "desc": desc, "lat": lat, "lon": lon, "foto": foto_bytes
                         })
         except:
             continue
-            
     return puntos_acumulados
 
 # ==========================================
@@ -642,6 +696,7 @@ opcion = st.sidebar.radio("Herramientas:", [
     "Generador Word (MAP)", 
     "Generador Word MAP (Desde PDF)", 
     "Generador Excel (Desde Word)",
+    "Generador Excel (Recolección Superficial)", # <--- NUEVA OPCIÓN
     "Generador Fichas (Desde Word)",
     "Generador KMZ (Georreferenciación)",
     "Visor de Mapa Interactivo"
@@ -667,30 +722,22 @@ if opcion == "Generador Word (MAP)":
             st.download_button("Descargar Word", doc_out, "Resumen_MAP.docx")
         else: st.error("No se encontraron datos.")
 
-# 1.1 Generador Word MAP (Desde PDF) - V8
+# 1.1 Generador Word MAP (Desde PDF)
 elif opcion == "Generador Word MAP (Desde PDF)":
     st.title("Generador Word MAP (Desde PDF)")
     st.markdown("Crea la tabla resumen mensual extrayendo datos de reportes en PDF.")
     st.warning("Requiere librería 'pymupdf' instalada.")
-    
     archivos = st.file_uploader("Subir Reportes PDF (.pdf)", accept_multiple_files=True, key="pdf_up")
-    
     if archivos and st.button("Procesar PDFs y Generar Word"):
         todas_fichas = []
         bar = st.progress(0)
-        
         for i, a in enumerate(archivos):
             fichas = procesar_pdf_a_word_map(a.read(), a.name)
             todas_fichas.extend(fichas)
             bar.progress((i+1)/len(archivos))
-            
         if todas_fichas:
-            # Ordenar por fecha si es posible
             todas_fichas.sort(key=lambda x: x['fecha'] if x['fecha'] else "ZZZ")
-            
-            # Reutilizamos la función de formato que ya existe
             doc_out = generar_word_con_formato(todas_fichas)
-            
             st.success(f"✅ Se procesaron {len(todas_fichas)} fichas desde PDF.")
             st.download_button("Descargar Word Resumen", doc_out, "Resumen_MAP_Desde_PDF.docx")
         else:
@@ -717,6 +764,49 @@ elif opcion == "Generador Excel (Desde Word)":
                 df.to_excel(writer, index=False, sheet_name="Resumen")
             st.download_button("⬇️ Descargar Excel", buffer.getvalue(), "Resumen_Word_Excel.xlsx")
         else: st.error("No se encontraron datos.")
+
+# 2.2 Generador Excel (Recolección Superficial) - NUEVO MÓDULO
+elif opcion == "Generador Excel (Recolección Superficial)":
+    st.title("Generador Excel (Recolección Superficial)")
+    st.markdown("Extrae datos específicos de las Fichas de Recolección Superficial en PDF para exportarlos a Excel.")
+    st.info("Columnas: Responsable, Sitio, Hallazgo Previsto, Cuadrante, Dimensión, Fecha, UTM Norte, UTM Este, Material, Superficie.")
+    
+    archivos = st.file_uploader("Subir Fichas PDF (.pdf)", accept_multiple_files=True, key="pdf_recoleccion_up")
+    
+    if archivos and st.button("Generar Base de Datos Excel"):
+        todas_las_fichas = []
+        bar = st.progress(0)
+        
+        # Procesamos cada PDF subido
+        for i, a in enumerate(archivos):
+            fichas_extraidas = procesar_pdf_recoleccion_superficial(a.read(), a.name)
+            todas_las_fichas.extend(fichas_extraidas)
+            bar.progress((i+1)/len(archivos))
+            
+        if todas_las_fichas:
+            # Convertir a DataFrame de Pandas con el orden de columnas exacto
+            columnas_ordenadas = [
+                "Responsable", "Sitio", "Hallazgo Previsto", "Cuadrante", 
+                "Dimensión", "Fecha", "UTM Norte", "UTM Este", "Material", "Superficie"
+            ]
+            df = pd.DataFrame(todas_las_fichas)[columnas_ordenadas]
+            
+            st.success(f"✅ Se extrajeron {len(df)} registros correctamente.")
+            st.dataframe(df) # Mostrar preview en pantalla
+            
+            # Crear archivo Excel en memoria para descargar
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, sheet_name="Hallazgos Previstos")
+            
+            st.download_button(
+                label="⬇️ Descargar Excel", 
+                data=buffer.getvalue(), 
+                file_name="Base_Datos_Recoleccion_Superficial.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.error("No se encontraron datos de recolección válidos en los PDFs subidos.")
 
 # 3. Generador Fichas (Desde Word)
 elif opcion == "Generador Fichas (Desde Word)":

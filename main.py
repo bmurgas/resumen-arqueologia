@@ -352,7 +352,7 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     return fichas
 
 # ==========================================
-# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL) - COINCIDENCIA EXACTA
+# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL) - SOLUCIÓN COLUMNAS
 # ==========================================
 
 def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
@@ -369,101 +369,76 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
         bloques = [b for b in bloques if b[4].strip()]
         if not bloques: continue
         
-        txt_pag = pagina.get_text("text")
-
+        width = pagina.rect.width
+        
+        # SOLUCIÓN DE AISLAMIENTO: Dividimos la hoja a la mitad. 
+        # Leemos todo el lado izquierdo, y luego el lado derecho.
+        # Esto evita cruzar "Material" con "Superficie".
+        bloques.sort(key=lambda b: (1 if b[0] > width/2 else 0, b[1]))
+        
+        lineas_puras = []
+        for b in bloques:
+            for l in b[4].split('\n'):
+                l = l.strip()
+                if l:
+                    lineas_puras.append(l)
+        
         ficha = {
             "Responsable": "", "Sitio": "", "Hallazgo Previsto": "",
             "Cuadrante": "", "Dimensión": "", "Fecha": "",
             "UTM Norte": "", "UTM Este": "", "Material": "", "Superficie": ""
         }
 
-        # FUNCIÓN GEOMÉTRICA CON COINCIDENCIA EXACTA
-        def obtener_valor_visual(label, direccion="abajo"):
-            bloque_label = None
+        # Buscamos con coincidencias exactas para no tomar fragmentos de títulos largos
+        for i, linea in enumerate(lineas_puras):
+            lin_lower = linea.lower()
             
-            for b in bloques:
-                lineas = [l.strip() for l in b[4].split('\n') if l.strip()]
-                for i, l in enumerate(lineas):
-                    es_etiqueta_exacta = False
+            if lin_lower == "responsable" or lin_lower == "responsable:":
+                if i + 1 < len(lineas_puras): ficha["Responsable"] = lineas_puras[i+1]
+            
+            elif lin_lower == "sitio" or lin_lower == "sitio:":
+                if i + 1 < len(lineas_puras): ficha["Sitio"] = lineas_puras[i+1]
+            
+            # El ID está siempre justo arriba de la palabra "Hallazgo Previsto"
+            elif lin_lower == "hallazgo previsto" or lin_lower == "hallazgo previsto:":
+                if i - 1 >= 0: ficha["Hallazgo Previsto"] = lineas_puras[i-1]
+            
+            elif lin_lower == "cuadrante" or lin_lower == "cuadrante:":
+                if i + 1 < len(lineas_puras): ficha["Cuadrante"] = lineas_puras[i+1]
+            
+            elif lin_lower == "dimensión" or lin_lower == "dimension" or lin_lower == "dimensión:":
+                if i + 1 < len(lineas_puras): ficha["Dimensión"] = lineas_puras[i+1]
+            
+            elif lin_lower == "fecha" or lin_lower == "fecha:":
+                if i + 1 < len(lineas_puras): ficha["Fecha"] = lineas_puras[i+1]
+            
+            elif lin_lower == "material" or lin_lower == "material:":
+                if i + 1 < len(lineas_puras): ficha["Material"] = lineas_puras[i+1]
+            
+            elif lin_lower == "superficie" or lin_lower == "superficie:":
+                if i + 1 < len(lineas_puras): ficha["Superficie"] = lineas_puras[i+1]
+            
+            elif lin_lower.startswith("utm norte"):
+                val = linea[len("UTM Norte"):].strip()
+                val = re.sub(r'^[:\-\s]+', '', val)
+                if val:
+                    ficha["UTM Norte"] = val
+                elif i + 1 < len(lineas_puras):
+                    ficha["UTM Norte"] = lineas_puras[i+1]
                     
-                    # 1. COINCIDENCIA EXACTA: Evita confundir "Material" con "MATERIAL CULTURAL"
-                    if l.lower() == label.lower() or l.lower() == label.lower() + ":":
-                        es_etiqueta_exacta = True
-                    # Caso especial para las UTM que a veces vienen en la misma línea
-                    elif label.lower() in ["utm norte", "utm este"] and l.lower().startswith(label.lower()):
-                        es_etiqueta_exacta = True
-                        
-                    if es_etiqueta_exacta:
-                        # Si el dato está escrito en la misma línea (Ej: "UTM Norte 5538910")
-                        prefijo_len = len(label)
-                        if len(l) > prefijo_len + 1:
-                            resto = l[prefijo_len:].strip()
-                            resto = re.sub(r'^[:\-\s]+', '', resto)
-                            if resto: return resto
-                            
-                        # Si el dato está en la siguiente línea del MISMO bloque
-                        if direccion == "abajo" and i + 1 < len(lineas):
-                            return lineas[i+1]
-                        elif direccion == "arriba" and i - 1 >= 0:
-                            return lineas[i-1]
-                            
-                        # Si el dato está en un bloque separado, guardamos este bloque para buscarlo
-                        bloque_label = b
-                        break
-                if bloque_label:
-                    break
-            
-            if not bloque_label: return ""
+            elif lin_lower.startswith("utm este"):
+                val = linea[len("UTM Este"):].strip()
+                val = re.sub(r'^[:\-\s]+', '', val)
+                if val:
+                    ficha["UTM Este"] = val
+                elif i + 1 < len(lineas_puras):
+                    ficha["UTM Este"] = lineas_puras[i+1]
 
-            # Si el valor está en un bloque distinto, lo buscamos usando coordenadas (misma columna visual)
-            lx0, ly0, lx1, ly1 = bloque_label[:4]
-            candidatos = []
-            
-            for b in bloques:
-                if b == bloque_label: continue
-                bx0, by0, bx1, by1, btxt = b[:5]
-                
-                # Tolerancia de columna (Debe estar alineado verticalmente)
-                if abs(bx0 - lx0) < 60:
-                    if direccion == "abajo" and by0 >= ly0 - 5: 
-                        candidatos.append((by0, btxt.strip().split('\n')[0]))
-                    elif direccion == "arriba" and by1 <= ly1 + 5: 
-                        candidatos.append((by1, btxt.strip().split('\n')[-1]))
-                        
-            if candidatos:
-                if direccion == "abajo":
-                    candidatos.sort(key=lambda x: x[0]) 
-                else:
-                    candidatos.sort(key=lambda x: x[0], reverse=True) 
-                return candidatos[0][1]
-                
-            return ""
-
-        # EXTRACCIÓN PROTEGIDA (Usa la función que acabamos de definir)
-        ficha["Responsable"] = obtener_valor_visual("Responsable", "abajo")
-        ficha["Sitio"] = obtener_valor_visual("Sitio", "abajo")
-        ficha["Hallazgo Previsto"] = obtener_valor_visual("Hallazgo Previsto", "arriba") # <--- Se busca hacia arriba
-        ficha["Cuadrante"] = obtener_valor_visual("Cuadrante", "abajo")
-        ficha["Dimensión"] = obtener_valor_visual("Dimensión", "abajo")
-        ficha["Material"] = obtener_valor_visual("Material", "abajo")
-        ficha["Superficie"] = obtener_valor_visual("Superficie", "abajo")
-        ficha["Fecha"] = obtener_valor_visual("Fecha", "abajo")
-        ficha["UTM Norte"] = obtener_valor_visual("UTM Norte", "abajo")
-        ficha["UTM Este"] = obtener_valor_visual("UTM Este", "abajo")
-
-        # RESPALDOS DE SEGURIDAD
-        if not ficha["Fecha"]:
-            m = re.search(r"(\d{2}/\d{2}/\d{4})", txt_pag)
-            if m: ficha["Fecha"] = m.group(1)
-
-        if not ficha["Hallazgo Previsto"] or len(ficha["Hallazgo Previsto"]) < 4:
-            m = re.search(r"(HLU_HP_\d+|HP_\d+)", txt_pag)
+        # Respaldo si no encontró el ID del hallazgo
+        if not ficha["Hallazgo Previsto"]:
+            texto_total = "\n".join(lineas_puras)
+            m = re.search(r"(HLU_HP_\d+|HP_\d+)", texto_total)
             if m: ficha["Hallazgo Previsto"] = m.group(1)
-
-        # Evitar auto-referencias por si la extracción falla
-        for k in ficha:
-            if ficha[k].lower() == k.lower():
-                ficha[k] = ""
 
         if ficha["Sitio"] or ficha["Responsable"]:
             fichas.append(ficha)

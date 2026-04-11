@@ -222,7 +222,7 @@ def generar_word_con_formato(datos):
     return buffer
 
 # ==========================================
-# 2.1 LÓGICA NUEVA: GENERADOR WORD MAP (DESDE PDF) - V8 FINAL (Con Hallazgos)
+# 2.1 LÓGICA NUEVA: GENERADOR WORD MAP (DESDE PDF)
 # ==========================================
 
 def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
@@ -352,7 +352,7 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     return fichas
 
 # ==========================================
-# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL) DESDE PDF
+# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL) - LÓGICA GEOMÉTRICA INFALIBLE
 # ==========================================
 
 def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
@@ -363,75 +363,112 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
         return []
 
     fichas = []
-    texto_completo = ""
-    
-    # Extraemos el texto respetando los bloques nativos del PDF sin forzar el orden Y
-    # Esto mantiene intactas las columnas y evita cruzar datos de la izquierda con la derecha
+
+    # Procesamos el PDF página por página (cada página es una ficha en este formato)
     for pagina in doc:
-        texto_completo += pagina.get_text("text") + "\n"
-
-    # Dividimos el texto gigante por cada nueva ficha que empiece
-    fragmentos_fichas = texto_completo.split("Ficha de Recolección Superficial")
-
-    for fragmento in fragmentos_fichas:
-        if len(fragmento.strip()) < 50:
-            continue # Ignorar pedazos vacíos generados por el split
-
-        # Limpiamos y preparamos las líneas
-        lineas = [linea.strip() for linea in fragmento.split('\n') if linea.strip()]
+        bloques = pagina.get_text("blocks")
+        # Filtramos bloques vacíos
+        bloques = [b for b in bloques if b[4].strip()]
+        
+        if not bloques: continue
+        
+        txt_pag = pagina.get_text("text")
 
         ficha = {
             "Responsable": "", "Sitio": "", "Hallazgo Previsto": "",
             "Cuadrante": "", "Dimensión": "", "Fecha": "",
             "UTM Norte": "", "UTM Este": "", "Material": "", "Superficie": ""
         }
+        
+        # FUNCIÓN MAESTRA GEOMÉTRICA
+        def obtener_valor_visual(label, direccion="abajo"):
+            """
+            Busca la palabra clave (label). Si encuentra la palabra, busca cuál es el bloque
+            de texto que está geométricamente situado debajo (o arriba) en la misma columna.
+            """
+            bloque_titulo = None
+            
+            # 1. Buscar si el valor está en el mismo bloque pero separado por salto de línea
+            for b in bloques:
+                if label.lower() in b[4].lower():
+                    bloque_titulo = b
+                    lineas = [l.strip() for l in b[4].strip().split('\n') if l.strip()]
+                    for i, l in enumerate(lineas):
+                        if label.lower() in l.lower():
+                            if direccion == "abajo" and i + 1 < len(lineas):
+                                return lineas[i+1]
+                            elif direccion == "arriba" and i - 1 >= 0:
+                                return lineas[i-1]
+                    break # Si encontramos el título pero no el valor en sus líneas, procedemos a buscar geométricamente
+            
+            if not bloque_titulo: return ""
+            
+            # 2. Búsqueda Geométrica (Buscar el bloque más cercano en la dirección pedida)
+            mejor_texto = ""
+            mejor_distancia = 9999
+            lx0, ly0, lx1, ly1 = bloque_titulo[:4] # Coordenadas del bloque título
+            
+            for b in bloques:
+                if b == bloque_titulo: continue
+                bx0, by0, bx1, by1, btext = b[:5]
+                
+                # Condición: Debe estar en la misma columna (margen izquierdo similar con 80px de tolerancia)
+                if abs(bx0 - lx0) > 80:
+                    continue
+                
+                if direccion == "abajo":
+                    if by0 >= ly0 - 10: # Está debajo
+                        distancia = by0 - ly1
+                        if 0 <= distancia < mejor_distancia:
+                            mejor_distancia = distancia
+                            mejor_texto = btext.strip().split('\n')[0] # Toma la primera línea
+                
+                elif direccion == "arriba":
+                    if by1 <= ly1 + 10: # Está arriba
+                        distancia = ly0 - by1
+                        if 0 <= distancia < mejor_distancia:
+                            mejor_distancia = distancia
+                            mejor_texto = btext.strip().split('\n')[-1] # Toma la última línea
+                            
+            return mejor_texto
 
-        # Buscamos línea por línea los valores
-        for i, linea in enumerate(lineas):
-            if linea == "Responsable" and i + 1 < len(lineas):
-                ficha["Responsable"] = lineas[i+1]
+        # APLICAR EXTRACCIÓN GEOMÉTRICA (Sin cruce de columnas)
+        ficha["Responsable"] = obtener_valor_visual("Responsable", "abajo")
+        ficha["Sitio"] = obtener_valor_visual("Sitio", "abajo")
+        ficha["Hallazgo Previsto"] = obtener_valor_visual("Hallazgo Previsto", "arriba")
+        ficha["Cuadrante"] = obtener_valor_visual("Cuadrante", "abajo")
+        ficha["Dimensión"] = obtener_valor_visual("Dimensión", "abajo")
+        ficha["Material"] = obtener_valor_visual("Material", "abajo")
+        ficha["Superficie"] = obtener_valor_visual("Superficie", "abajo")
+        
+        # RESPALDOS CON REGEX (Para Fecha y Coordenadas por si vienen en formatos raros)
+        ficha["Fecha"] = obtener_valor_visual("Fecha", "abajo")
+        if not ficha["Fecha"]:
+            m = re.search(r"(\d{2}/\d{2}/\d{4})", txt_pag)
+            if m: ficha["Fecha"] = m.group(1)
             
-            elif linea == "Sitio" and i + 1 < len(lineas):
-                ficha["Sitio"] = lineas[i+1]
+        ficha["UTM Norte"] = obtener_valor_visual("UTM Norte", "abajo")
+        if not ficha["UTM Norte"]:
+            m = re.search(r"UTM Norte\s*(\d{7})", txt_pag)
+            if m: ficha["UTM Norte"] = m.group(1)
             
-            elif linea == "Hallazgo Previsto" and i - 1 >= 0:
-                # Al no mezclar las columnas, la información de "HLU_HP_X" queda exactamente una línea arriba
-                ficha["Hallazgo Previsto"] = lineas[i-1]
+        ficha["UTM Este"] = obtener_valor_visual("UTM Este", "abajo")
+        if not ficha["UTM Este"]:
+            m = re.search(r"UTM Este\s*(\d{6})", txt_pag)
+            if m: ficha["UTM Este"] = m.group(1)
             
-            elif linea == "Cuadrante" and i + 1 < len(lineas):
-                ficha["Cuadrante"] = lineas[i+1]
-            
-            elif linea == "Dimensión" and i + 1 < len(lineas):
-                ficha["Dimensión"] = lineas[i+1]
-            
-            elif linea == "Fecha" and i + 1 < len(lineas):
-                ficha["Fecha"] = lineas[i+1]
-            
-            elif linea.startswith("UTM Norte"):
-                val = linea.replace("UTM Norte", "").strip()
-                if val:
-                    ficha["UTM Norte"] = val
-                elif i + 1 < len(lineas):
-                    ficha["UTM Norte"] = lineas[i+1]
-            
-            elif linea.startswith("UTM Este"):
-                val = linea.replace("UTM Este", "").strip()
-                if val:
-                    ficha["UTM Este"] = val
-                elif i + 1 < len(lineas):
-                    ficha["UTM Este"] = lineas[i+1]
-            
-            elif linea == "Material" and i + 1 < len(lineas):
-                ficha["Material"] = lineas[i+1]
-            
-            elif linea.startswith("Superficie"):
-                val = linea.replace("Superficie", "").strip()
-                if val:
-                    ficha["Superficie"] = val
-                elif i + 1 < len(lineas):
-                    ficha["Superficie"] = lineas[i+1]
+        # Respaldo extra para Hallazgo Previsto (Busca cualquier código que empiece con HLU_HP_ o HP_)
+        if not ficha["Hallazgo Previsto"] or ficha["Hallazgo Previsto"].lower() == "hallazgo previsto":
+            m = re.search(r"(HLU_HP_\d+|HP_\d+)", txt_pag)
+            if m: ficha["Hallazgo Previsto"] = m.group(1)
 
-        fichas.append(ficha)
+        # Limpieza final de basurillas (evitar que el valor repita el título)
+        for k, v in ficha.items():
+            ficha[k] = v.replace("UTM Norte", "").replace("UTM Este", "").strip()
+
+        # Si capturó información clave, lo añade a la base de datos
+        if ficha["Sitio"] or ficha["Hallazgo Previsto"]:
+            fichas.append(ficha)
 
     return fichas
 
@@ -447,38 +484,27 @@ def procesar_word_a_excel(archivo_bytes, nombre_archivo):
         return []
 
     registros = []
-    
     for tabla in doc.tables:
-        dato = {
-            "Fecha": "",
-            "Descripción de la actividad": "",
-            "Descripción estratigráfica": ""
-        }
+        dato = {"Fecha": "", "Descripción de la actividad": "", "Descripción estratigráfica": ""}
         encontrado = False 
-        
         for fila in tabla.rows:
             for i, celda in enumerate(fila.cells):
                 texto_celda = celda.text.strip()
-                
                 if "Fecha" in texto_celda and len(texto_celda) < 20:
                     if i + 1 < len(fila.cells):
                         dato["Fecha"] = fila.cells[i+1].text.strip()
                         encontrado = True
-                
                 if "Descripción de la actividad" in texto_celda:
                     if i + 1 < len(fila.cells):
                         dato["Descripción de la actividad"] = fila.cells[i+1].text.strip()
                         encontrado = True
-
                 if "Descripción estratigráfica" in texto_celda:
                     if i + 1 < len(fila.cells):
                         dato["Descripción estratigráfica"] = fila.cells[i+1].text.strip()
                         encontrado = True
-
         if encontrado:
             if dato["Fecha"] or dato["Descripción de la actividad"] or dato["Descripción estratigráfica"]:
                 registros.append(dato)
-                
     return registros
 
 # ==========================================
@@ -493,7 +519,6 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
         return []
 
     fichas = []
-    
     for tabla in doc.tables:
         info = {
             "ID Sitio": "", "Coord. Norte": "", "Coord. Este": "", 
@@ -513,29 +538,23 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
                     if val:
                         info["ID Sitio"] = val
                         es_ficha = True
-                
                 if "Fecha" in txt and c_idx + 1 < len(fila.cells):
                     info["Fecha"] = fila.cells[c_idx+1].text.strip()
-                        
                 if "Responsable" in txt and c_idx + 1 < len(fila.cells):
                     info["Responsable"] = fila.cells[c_idx+1].text.strip()
-
                 if "Categoría" in txt and c_idx + 1 < len(fila.cells):
                     info["Categoría"] = fila.cells[c_idx+1].text.strip()
-
                 if "Coord. Central Norte" in txt and c_idx + 1 < len(fila.cells):
                     info["Coord. Norte"] = fila.cells[c_idx+1].text.strip()
                 if "Coord. Central Este" in txt and c_idx + 1 < len(fila.cells):
                     info["Coord. Este"] = fila.cells[c_idx+1].text.strip()
 
-                # Descripción
                 if txt == "Descripción": 
                     if c_idx + 1 < len(fila.cells):
                         vecino = fila.cells[c_idx+1].text.strip()
                         if "CRONOLOGÍA" not in vecino:
                             info["Descripción"] = vecino
                 
-                # Cronología
                 opciones = ["Prehispánico", "Subactual", "Incierto", "Histórico"]
                 for op in opciones:
                     if op in txt:
@@ -551,7 +570,6 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
                         if val and len(val) > 1 and "X" not in val.upper():
                             crono_extra.append(f"Periodo específico: {val}")
 
-                # Foto
                 if "Fotografía detalle" in txt:
                     if r_idx > 0:
                         celda_arriba = tabla.rows[r_idx - 1].cells[c_idx]
@@ -570,7 +588,6 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
 
 def crear_doc_tabla_horizontal(datos):
     doc = Document()
-    
     section = doc.sections[0]
     new_width, new_height = section.page_height, section.page_width
     section.orientation = WD_ORIENT.LANDSCAPE

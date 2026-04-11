@@ -352,10 +352,14 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     return fichas
 
 # ==========================================
-# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL) - RECONSTRUCCIÓN EXACTA
+# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL) - LÓGICA DE TEXTO PURO
 # ==========================================
 
 def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
+    """
+    Solución Definitiva: Extrae el texto del PDF de forma nativa sin ordenar coordenadas.
+    Internamente el PDF tiene la lista lógica perfecta (Ej: Etiqueta -> Valor).
+    """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     except Exception as e:
@@ -365,149 +369,82 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
     fichas = []
 
     for pagina in doc:
-        dict_data = pagina.get_text("dict")
-        raw_spans = []
+        texto_completo = pagina.get_text("text")
         
-        # 1. Extraer todas las partes minúsculas de texto
-        for b in dict_data.get("blocks", []):
-            if b.get("type") == 0:  
-                for l in b.get("lines", []):
-                    for s in l.get("spans", []):
-                        txt = s.get("text", "").strip()
-                        if txt:
-                            raw_spans.append({
-                                "text": txt,
-                                "x0": s["bbox"][0], "y0": s["bbox"][1], 
-                                "x1": s["bbox"][2], "y1": s["bbox"][3]
-                            })
+        # Limpiamos las líneas vacías
+        lineas = [l.strip() for l in texto_completo.split('\n') if l.strip()]
         
-        if not raw_spans: continue
-
-        # 2. Reconstruir bloques lógicos juntando textos que estén al lado
-        raw_spans.sort(key=lambda s: (s["y0"], s["x0"]))
-        elementos = []
-        current = raw_spans[0]
-        
-        for s in raw_spans[1:]:
-            # Si están en la misma línea vertical (diferencia de Y < 8px) 
-            # y cerca horizontalmente (diferencia de X < 25px) -> Se unen.
-            # Esto evita unir columnas separadas
-            if abs(s["y0"] - current["y0"]) < 8 and (s["x0"] - current["x1"]) < 25:
-                current["text"] += " " + s["text"]
-                current["x1"] = max(current["x1"], s["x1"])
-                current["y0"] = min(current["y0"], s["y0"])
-                current["y1"] = max(current["y1"], s["y1"])
-            else:
-                current["xc"] = (current["x0"] + current["x1"]) / 2
-                elementos.append(current)
-                current = s
-                
-        current["xc"] = (current["x0"] + current["x1"]) / 2
-        elementos.append(current)
+        if len(lineas) < 10:
+            continue
 
         ficha = {
             "Responsable": "", "Sitio": "", "Hallazgo Previsto": "",
             "Cuadrante": "", "Dimensión": "", "Fecha": "",
             "UTM Norte": "", "UTM Este": "", "Material": "", "Superficie": ""
         }
-        
-        # 3. Función matemática de extracción
-        def buscar_valor(label, direccion="abajo"):
-            target = None
-            
-            # Buscar el título exacto
-            for el in elementos:
-                clean_text = el["text"].lower().replace(':', '').strip()
-                if clean_text == label.lower():
-                    target = el
-                    break
-            
-            if not target: return ""
 
-            candidatos = []
-            
-            for el in elementos:
-                if el == target: continue
-                
-                # REGLA ORO 1: Alineación de columna estricta
-                # Permitimos 80px de desviación para acomodar márgenes indentados
-                align_left = abs(el["x0"] - target["x0"]) < 80
-                align_center = abs(el["xc"] - target["xc"]) < 80
-                
-                if not (align_left or align_center): continue
-                
-                # REGLA ORO 2: Posición Vertical estricta
-                if direccion == "abajo":
-                    # DEBE estar debajo (Y mayor), evitando tomar textos de la misma línea lateral
-                    if el["y0"] >= target["y1"] - 4:
-                        candidatos.append(el)
-                elif direccion == "arriba":
-                    # DEBE estar arriba (Y menor)
-                    if el["y1"] <= target["y0"] + 4:
-                        candidatos.append(el)
-            
-            # 4. Elegir el valor más cercano a la etiqueta
-            if candidatos:
-                if direccion == "abajo":
-                    candidatos.sort(key=lambda x: x["y0"]) 
-                else:
-                    candidatos.sort(key=lambda x: x["y1"], reverse=True) 
-                return candidatos[0]["text"]
-                
-            return ""
+        # Recorremos la lista secuencial
+        for i, linea in enumerate(lineas):
+            # Limpiamos dos puntos y pasamos a minúsculas para coincidencia exacta
+            lin_lower = linea.lower().replace(":", "").strip()
 
-        # Función especial para UTM por si vienen pegados
-        def buscar_utm(label):
-            target = None
-            for el in elementos:
-                # Caso A: Viene pegado (Ej: "UTM Norte 5538910")
-                if el["text"].lower().startswith(label.lower()):
-                    val = el["text"][len(label):].strip()
-                    val = re.sub(r'^[:\-\s]+', '', val)
-                    if val: return val
-                    target = el
-                    break
+            if lin_lower == "responsable":
+                if i + 1 < len(lineas): ficha["Responsable"] = lineas[i+1]
+            
+            elif lin_lower == "sitio":
+                if i + 1 < len(lineas): ficha["Sitio"] = lineas[i+1]
+            
+            elif lin_lower == "hallazgo previsto":
+                if i - 1 >= 0: ficha["Hallazgo Previsto"] = lineas[i-1] # El ID siempre está escrito una línea arriba
+            
+            elif lin_lower == "cuadrante":
+                if i + 1 < len(lineas): ficha["Cuadrante"] = lineas[i+1]
+            
+            elif lin_lower in ["dimensión", "dimension"]:
+                if i + 1 < len(lineas): ficha["Dimensión"] = lineas[i+1]
+            
+            elif lin_lower == "fecha":
+                if i + 1 < len(lineas): ficha["Fecha"] = lineas[i+1]
+            
+            elif lin_lower == "material":
+                if i + 1 < len(lineas): ficha["Material"] = lineas[i+1]
+            
+            elif lin_lower == "superficie":
+                if i + 1 < len(lineas): ficha["Superficie"] = lineas[i+1]
+            
+            # Casos de coordenadas que pueden venir en la misma línea o en la de abajo
+            elif lin_lower.startswith("utm norte"):
+                val = linea[len("UTM Norte"):].strip()
+                val = re.sub(r'^[:\-\s]+', '', val)
+                if val:
+                    ficha["UTM Norte"] = val
+                elif i + 1 < len(lineas):
+                    ficha["UTM Norte"] = lineas[i+1]
                     
-            if target:
-                # Caso B: Viene en la caja de al lado
-                cands_derecha = []
-                for el in elementos:
-                    if el == target: continue
-                    if abs(el["y0"] - target["y0"]) < 10 and el["x0"] >= target["x1"]:
-                        cands_derecha.append(el)
-                if cands_derecha:
-                    cands_derecha.sort(key=lambda x: x["x0"])
-                    return cands_derecha[0]["text"]
-            
-            # Caso C: Viene abajo de forma tradicional
-            return buscar_valor(label, "abajo")
+            elif lin_lower.startswith("utm este"):
+                val = linea[len("UTM Este"):].strip()
+                val = re.sub(r'^[:\-\s]+', '', val)
+                if val:
+                    ficha["UTM Este"] = val
+                elif i + 1 < len(lineas):
+                    ficha["UTM Este"] = lineas[i+1]
 
-        # EXTRACCIÓN SEGURA A PRUEBA DE BALAS
-        ficha["Responsable"] = buscar_valor("Responsable", "abajo")
-        ficha["Sitio"] = buscar_valor("Sitio", "abajo")
-        ficha["Hallazgo Previsto"] = buscar_valor("Hallazgo Previsto", "arriba") # Hacia arriba
-        ficha["Cuadrante"] = buscar_valor("Cuadrante", "abajo")
-        ficha["Dimensión"] = buscar_valor("Dimensión", "abajo") or buscar_valor("Dimension", "abajo")
-        ficha["Fecha"] = buscar_valor("Fecha", "abajo")
-        ficha["Material"] = buscar_valor("Material", "abajo")
-        ficha["Superficie"] = buscar_valor("Superficie", "abajo")
-        ficha["UTM Norte"] = buscar_utm("UTM Norte")
-        ficha["UTM Este"] = buscar_utm("UTM Este")
+        # FASE DE LIMPIEZA: Si el código capturó un título de otra columna por error, lo vaciamos
+        etiquetas_conocidas = ["sitio", "responsable", "cuadrante", "dimensión", "dimension", "fecha", "material", "superficie", "coordenadas", "identificación", "procedencia y material cultural"]
+        
+        for key in list(ficha.keys()):
+            val_limpio = str(ficha[key]).lower().strip()
+            if val_limpio in etiquetas_conocidas or val_limpio == key.lower():
+                ficha[key] = ""
 
-        # RESPALDOS FINALES
-        txt_pag = pagina.get_text("text")
+        # RESPALDOS DE SEGURIDAD (Usando Regex sobre el texto total)
         if not ficha["Fecha"]:
-            m = re.search(r"(\d{2}/\d{2}/\d{4})", txt_pag)
+            m = re.search(r"(\d{2}/\d{2}/\d{4})", texto_completo)
             if m: ficha["Fecha"] = m.group(1)
 
         if not ficha["Hallazgo Previsto"] or len(ficha["Hallazgo Previsto"]) < 4:
-            m = re.search(r"(HLU_HP_\d+|HP_\d+)", txt_pag)
+            m = re.search(r"(HLU_HP_\d+|HP_\d+)", texto_completo)
             if m: ficha["Hallazgo Previsto"] = m.group(1)
-
-        # LIMPIEZA DE COLISIÓN (Evitar copiar el mismo título)
-        for k in ficha:
-            if ficha[k].lower().replace(':', '').strip() == k.lower():
-                ficha[k] = ""
 
         if ficha["Sitio"] or ficha["Responsable"]:
             fichas.append(ficha)

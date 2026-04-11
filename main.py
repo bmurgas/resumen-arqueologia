@@ -352,13 +352,13 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     return fichas
 
 # ==========================================
-# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL) - SOLUCIÓN REGEX
+# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL) - TEXTO LÓGICO + FIX
 # ==========================================
 
 def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
     """
-    Solución definitiva usando Expresiones Regulares sobre el texto crudo.
-    Esto ignora la geometría y columnas, y busca patrones lógicos en el orden natural del PDF.
+    Extrae el texto del PDF de forma nativa. 
+    Contiene el parche específico para evitar el salto de Material/Superficie.
     """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -369,10 +369,12 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
     fichas = []
 
     for pagina in doc:
-        texto = pagina.get_text("text")
+        texto_completo = pagina.get_text("text")
         
-        # Solo procesar páginas que parezcan fichas
-        if "Sitio" not in texto and "Responsable" not in texto:
+        # Limpiamos las líneas vacías
+        lineas = [l.strip() for l in texto_completo.split('\n') if l.strip()]
+        
+        if len(lineas) < 10:
             continue
 
         ficha = {
@@ -381,71 +383,80 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
             "UTM Norte": "", "UTM Este": "", "Material": "", "Superficie": ""
         }
 
-        # 1. Sitio: Busca la palabra "Sitio", los saltos de línea y toma el texto siguiente
-        m = re.search(r"Sitio\s*\n+([^\n]+)", texto)
-        if m: ficha["Sitio"] = m.group(1).strip()
+        # Recorremos la lista secuencial
+        for i, linea in enumerate(lineas):
+            # Limpiamos dos puntos y pasamos a minúsculas para coincidencia exacta
+            lin_lower = linea.lower().replace(":", "").strip()
+
+            if lin_lower == "responsable":
+                if i + 1 < len(lineas): ficha["Responsable"] = lineas[i+1]
+            
+            elif lin_lower == "sitio":
+                if i + 1 < len(lineas): ficha["Sitio"] = lineas[i+1]
+            
+            elif lin_lower == "hallazgo previsto":
+                pass # Se ignora aquí para que lo capture el sistema de seguridad (Regex) más abajo
+            
+            elif lin_lower == "cuadrante":
+                if i + 1 < len(lineas): ficha["Cuadrante"] = lineas[i+1]
+            
+            elif lin_lower in ["dimensión", "dimension"]:
+                if i + 1 < len(lineas): ficha["Dimensión"] = lineas[i+1]
+            
+            elif lin_lower == "fecha":
+                if i + 1 < len(lineas): ficha["Fecha"] = lineas[i+1]
+            
+            elif lin_lower == "material":
+                if i + 1 < len(lineas):
+                    # Si el PDF agrupó las columnas, la palabra siguiente es el otro título. Saltamos 2 espacios.
+                    if lineas[i+1].lower().replace(":", "").strip() == "superficie":
+                        if i + 2 < len(lineas): ficha["Material"] = lineas[i+2]
+                    else:
+                        ficha["Material"] = lineas[i+1]
+            
+            elif lin_lower == "superficie":
+                if i + 1 < len(lineas):
+                    # Si detecta la agrupación, salta el valor de material para tomar su propio valor
+                    if i - 1 >= 0 and lineas[i-1].lower().replace(":", "").strip() == "material":
+                        if i + 2 < len(lineas): ficha["Superficie"] = lineas[i+2]
+                    else:
+                        ficha["Superficie"] = lineas[i+1]
+            
+            # Casos de coordenadas que pueden venir en la misma línea o en la de abajo
+            elif lin_lower.startswith("utm norte"):
+                val = linea[len("UTM Norte"):].strip()
+                val = re.sub(r'^[:\-\s]+', '', val)
+                if val:
+                    ficha["UTM Norte"] = val
+                elif i + 1 < len(lineas):
+                    ficha["UTM Norte"] = lineas[i+1]
+                    
+            elif lin_lower.startswith("utm este"):
+                val = linea[len("UTM Este"):].strip()
+                val = re.sub(r'^[:\-\s]+', '', val)
+                if val:
+                    ficha["UTM Este"] = val
+                elif i + 1 < len(lineas):
+                    ficha["UTM Este"] = lineas[i+1]
+
+        # FASE DE LIMPIEZA: Si el código capturó un título de otra columna por error, lo vaciamos
+        etiquetas_conocidas = ["sitio", "responsable", "cuadrante", "dimensión", "dimension", "fecha", "material", "superficie", "coordenadas", "identificación", "procedencia y material cultural"]
         
-        # 2. Cuadrante
-        m = re.search(r"Cuadrante\s*\n+([^\n]+)", texto)
-        if m: ficha["Cuadrante"] = m.group(1).strip()
+        for key in list(ficha.keys()):
+            val_limpio = str(ficha[key]).lower().strip()
+            if val_limpio in etiquetas_conocidas or val_limpio == key.lower():
+                ficha[key] = ""
 
-        # 3. Responsable
-        m = re.search(r"Responsable\s*\n+([^\n]+)", texto)
-        if m: ficha["Responsable"] = m.group(1).strip()
-
-        # 4. Hallazgo Previsto (Suele estar escrito una línea arriba del título)
-        m = re.search(r"([^\n]+)\s*\n+Hallazgo Previsto", texto)
-        if m: 
-            ficha["Hallazgo Previsto"] = m.group(1).strip()
-        else:
-            # Respaldo: busca directamente el código
-            m = re.search(r"(HLU_HP_\d+|HP_\d+)", texto)
-            if m: ficha["Hallazgo Previsto"] = m.group(1)
-
-        # 5. Dimensión
-        m = re.search(r"Dimensi[oó]n\s*\n+([^\n]+)", texto, re.IGNORECASE)
-        if m: ficha["Dimensión"] = m.group(1).strip()
-
-        # 6. Fecha
-        m = re.search(r"Fecha\s*\n+([^\n]+)", texto)
-        if m: 
-            ficha["Fecha"] = m.group(1).strip()
-        # Si agarró algo que no es fecha, buscar por formato DD/MM/AAAA
-        if not ficha["Fecha"] or not re.search(r"\d", ficha["Fecha"]):
-            m = re.search(r"(\d{2}/\d{2}/\d{4})", texto)
+        # RESPALDOS DE SEGURIDAD (Usando Regex sobre el texto total)
+        if not ficha["Fecha"]:
+            m = re.search(r"(\d{2}/\d{2}/\d{4})", texto_completo)
             if m: ficha["Fecha"] = m.group(1)
 
-        # 7. UTM Norte (Puede estar en la misma línea o abajo)
-        m = re.search(r"UTM Norte\s*(?:\n\s*)?(\d+)", texto)
-        if m: ficha["UTM Norte"] = m.group(1).strip()
+        # Respaldo 100% seguro para el Hallazgo Previsto
+        if not ficha["Hallazgo Previsto"] or len(ficha["Hallazgo Previsto"]) < 4:
+            m = re.search(r"(HLU_HP_\d+|HP_\d+)", texto_completo)
+            if m: ficha["Hallazgo Previsto"] = m.group(1)
 
-        # 8. UTM Este
-        m = re.search(r"UTM Este\s*(?:\n\s*)?(\d+)", texto)
-        if m: ficha["UTM Este"] = m.group(1).strip()
-
-        # 9. Material
-        m = re.search(r"Material\s*\n+([^\n]+)", texto)
-        if m: ficha["Material"] = m.group(1).strip()
-
-        # 10. Superficie
-        m = re.search(r"Superficie\s*\n+([^\n]+)", texto)
-        if m: ficha["Superficie"] = m.group(1).strip()
-
-        # FASE DE LIMPIEZA: Si capturó un título de otra celda porque estaba vacío, lo borramos
-        etiquetas_conocidas = [
-            "Sitio", "Cuadrante", "Responsable", "Hallazgo Previsto", 
-            "Dimensión", "Dimension", "Fecha", "UTM Norte", "UTM Este", 
-            "Material", "Superficie", "Altura", "Descripción", "Cronología", 
-            "COORDENADAS", "IDENTIFICACIÓN", "PROCEDENCIA Y MATERIAL CULTURAL"
-        ]
-        
-        for k, v in ficha.items():
-            for et in etiquetas_conocidas:
-                if v.lower() == et.lower():
-                    ficha[k] = ""
-                    break
-
-        # Guardar solo si al menos hay un Sitio o Responsable válido
         if ficha["Sitio"] or ficha["Responsable"]:
             fichas.append(ficha)
 

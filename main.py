@@ -35,6 +35,7 @@ st.set_page_config(page_title="Arqueología - Suite Word", layout="wide")
 # ==========================================
 
 def obtener_imagenes_con_id(elemento_xml, doc_relacionado):
+    """Extrae imágenes incrustadas en una celda/párrafo de Word."""
     resultados = [] 
     blips = elemento_xml.xpath('.//a:blip')
     for blip in blips:
@@ -239,6 +240,7 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     }
     
     capturando_descripcion = False
+    
     blacklist_clean = [
         "V. DESCRripciones", "V. DESCRIPCIONES", "Descripción de la Actividad", 
         "Huso", "18 G", "19 H", "Datum", "WGS84",
@@ -323,6 +325,7 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
                 lista_imagenes = pagina.get_images(full=True)
                 for img in lista_imagenes:
                     bbox = pagina.get_image_bbox(img)
+                    
                     if bbox.y0 < 150: continue 
                     if tiene_titulo_VIII and bbox.y0 < y_titulo_VIII: continue 
                     base_image = doc.extract_image(img[0])
@@ -349,7 +352,7 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     return fichas
 
 # ==========================================
-# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL) - VISIÓN ESPACIAL ESTRICTA
+# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL) - POR MITADES DE HOJA
 # ==========================================
 
 def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
@@ -362,33 +365,25 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
     fichas = []
 
     for pagina in doc:
-        # Extraemos el diccionario visual que nos da las coordenadas (bbox) de cada línea
+        # Obtenemos el ancho total de la hoja para partirla por la mitad
+        width = pagina.rect.width
+        mitad_hoja = width / 2
+        
         dict_data = pagina.get_text("dict")
         elementos = []
         
+        # Extraer líneas de texto de forma pura
         for b in dict_data.get("blocks", []):
-            if b.get("type") == 0:  # Bloque de texto
+            if b.get("type") == 0:  
                 for l in b.get("lines", []):
-                    line_text = ""
-                    x0_min, y0_min = 9999, 9999
-                    x1_max, y1_max = -1, -1
-                    
-                    for s in l.get("spans", []):
-                        txt = s.get("text", "").strip()
-                        if txt:
-                            line_text += txt + " "
-                            sx0, sy0, sx1, sy1 = s.get("bbox")
-                            x0_min = min(x0_min, sx0)
-                            y0_min = min(y0_min, sy0)
-                            x1_max = max(x1_max, sx1)
-                            y1_max = max(y1_max, sy1)
-                    
-                    line_text = line_text.strip()
-                    if line_text:
+                    txt = "".join([s.get("text", "") for s in l.get("spans", [])]).strip()
+                    if txt:
+                        x0, y0, x1, y1 = l.get("bbox")
                         elementos.append({
-                            "text": line_text,
-                            "x0": x0_min, "y0": y0_min,
-                            "x1": x1_max, "y1": y1_max
+                            "text": txt,
+                            "y0": y0, 
+                            "y1": y1,
+                            "xc": (x0 + x1) / 2 # Centro horizontal de la palabra
                         })
                         
         if not elementos: continue
@@ -399,69 +394,85 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
             "UTM Norte": "", "UTM Este": "", "Material": "", "Superficie": ""
         }
         
-        # EL MOTOR ESPACIAL: Busca la caja de la etiqueta y luego mira qué hay arriba o abajo
-        def buscar_visual(label, direccion="abajo"):
-            target_elem = None
+        # Función extractora a prueba de balas
+        def buscar_valor(label, direccion="abajo"):
+            target = None
             
-            # Buscar coincidencia ESTRICTA de la etiqueta (ignorando mayúsculas)
+            # Buscar la etiqueta (coincidencia exacta)
             for el in elementos:
-                if el["text"].lower() == label.lower() or el["text"].lower() == label.lower() + ":":
-                    target_elem = el
+                clean_text = el["text"].lower().replace(':', '').strip()
+                if clean_text == label.lower():
+                    target = el
                     break
             
-            if not target_elem: return ""
+            if not target: return ""
+
+            # Determinar si la etiqueta está en la mitad IZQUIERDA o DERECHA de la hoja
+            esta_en_izquierda = target["xc"] < mitad_hoja
             
-            tx0, ty0, tx1, ty1 = target_elem["x0"], target_elem["y0"], target_elem["x1"], target_elem["y1"]
             candidatos = []
             
             for el in elementos:
-                if el == target_elem: continue
-                ex0, ey0, ex1, ey1 = el["x0"], el["y0"], el["x1"], el["y1"]
+                if el == target: continue
                 
-                # CONDICIÓN DE ORO: Tienen que compartir el espacio horizontal (misma columna visual)
-                # Si las cajas se superponen en el eje X, significa que están alineadas en la misma columna.
-                solapamiento_horizontal = max(0, min(tx1, ex1) - max(tx0, ex0))
+                # REGLA DE ORO: Solo mirar textos que estén en la misma mitad de la hoja
+                el_en_izquierda = el["xc"] < mitad_hoja
+                if esta_en_izquierda != el_en_izquierda: continue
                 
-                # También aceptamos si los bordes izquierdos están muy cerca (tolerancia de 50 píxeles)
-                si_comparte_columna = solapamiento_horizontal > 0 or abs(ex0 - tx0) < 50
-                
-                if si_comparte_columna:
-                    if direccion == "abajo" and ey0 >= ty0 - 5:
-                        candidatos.append((ey0, el["text"]))
-                    elif direccion == "arriba" and ey1 <= ty1 + 5:
-                        candidatos.append((ey1, el["text"]))
+                # Filtrar hacia abajo o arriba
+                if direccion == "abajo":
+                    if el["y0"] >= target["y0"] - 3: # Margen minúsculo de tolerancia
+                        candidatos.append(el)
+                elif direccion == "arriba":
+                    if el["y1"] <= target["y1"] + 3:
+                        candidatos.append(el)
             
             if candidatos:
-                # Ordenamos los candidatos según su cercanía vertical a la etiqueta
                 if direccion == "abajo":
-                    candidatos.sort(key=lambda x: x[0]) # El Y0 más pequeño (el que está justo abajo)
+                    candidatos.sort(key=lambda x: x["y0"]) # El valor más arriba (más cercano a la base)
                 else:
-                    candidatos.sort(key=lambda x: x[0], reverse=True) # El Y1 más grande (el que está justo arriba)
-                return candidatos[0][1]
+                    candidatos.sort(key=lambda x: x["y1"], reverse=True) # El valor más abajo (más cercano al techo)
+                
+                return candidatos[0]["text"]
+                
             return ""
 
-        # Función especial para las UTM, ya que a veces vienen pegadas en la misma caja (Ej: "UTM Norte 5538910")
+        # Función especial para UTM (a veces viene en 1 línea "UTM Norte 5538910")
         def buscar_utm(label):
             for el in elementos:
                 if el["text"].lower().startswith(label.lower()):
                     val = el["text"][len(label):].strip()
                     val = re.sub(r'^[:\-\s]+', '', val)
                     if val: return val
-            # Si no estaba pegado en la misma línea, busca la caja de abajo
-            return buscar_visual(label, "abajo")
+            return buscar_valor(label, "abajo")
 
-        # EJECUCIÓN (A prueba de balas)
-        ficha["Responsable"] = buscar_visual("Responsable", "abajo")
-        ficha["Sitio"] = buscar_visual("Sitio", "abajo")
-        ficha["Hallazgo Previsto"] = buscar_visual("Hallazgo Previsto", "arriba") # Se busca hacia ARRIBA
-        ficha["Cuadrante"] = buscar_visual("Cuadrante", "abajo")
-        ficha["Dimensión"] = buscar_visual("Dimensión", "abajo")
-        if not ficha["Dimensión"]: ficha["Dimensión"] = buscar_visual("Dimension", "abajo") # Por si no tiene tilde
-        ficha["Fecha"] = buscar_visual("Fecha", "abajo")
-        ficha["Material"] = buscar_visual("Material", "abajo")
-        ficha["Superficie"] = buscar_visual("Superficie", "abajo")
+        # EXTRACCIÓN
+        ficha["Responsable"] = buscar_valor("Responsable", "abajo")
+        ficha["Sitio"] = buscar_valor("Sitio", "abajo")
+        ficha["Hallazgo Previsto"] = buscar_valor("Hallazgo Previsto", "arriba") # Siempre se busca hacia arriba
+        ficha["Cuadrante"] = buscar_valor("Cuadrante", "abajo")
+        ficha["Dimensión"] = buscar_valor("Dimensión", "abajo")
+        if not ficha["Dimensión"]: ficha["Dimensión"] = buscar_valor("Dimension", "abajo") # Sin tilde
+        ficha["Fecha"] = buscar_valor("Fecha", "abajo")
+        ficha["Material"] = buscar_valor("Material", "abajo")
+        ficha["Superficie"] = buscar_valor("Superficie", "abajo")
         ficha["UTM Norte"] = buscar_utm("UTM Norte")
         ficha["UTM Este"] = buscar_utm("UTM Este")
+
+        # Respaldos en caso de formato inusual
+        txt_pag = pagina.get_text("text")
+        if not ficha["Fecha"]:
+            m = re.search(r"(\d{2}/\d{2}/\d{4})", txt_pag)
+            if m: ficha["Fecha"] = m.group(1)
+
+        if not ficha["Hallazgo Previsto"] or len(ficha["Hallazgo Previsto"]) < 4:
+            m = re.search(r"(HLU_HP_\d+|HP_\d+)", txt_pag)
+            if m: ficha["Hallazgo Previsto"] = m.group(1)
+
+        # Limpiar datos cruzados por error
+        for k in ficha:
+            if ficha[k].lower().replace(':', '').strip() == k.lower():
+                ficha[k] = ""
 
         if ficha["Sitio"] or ficha["Responsable"]:
             fichas.append(ficha)
@@ -669,7 +680,7 @@ def obtener_puntos_geograficos_con_foto(archivos):
                 for r_idx, fila in enumerate(tabla.rows):
                     for idx, celda in enumerate(fila.cells):
                         txt = celda.text.strip()
-                        if "ID Sitio" in txt and idx+1 < len(fila.cells): id_sitio = cells[idx+1].text.strip()
+                        if "ID Sitio" in txt and idx+1 < len(fila.cells): id_sitio = fila.cells[idx+1].text.strip()
                         if "Coord. Central Norte" in txt and idx+1 < len(fila.cells): norte = fila.cells[idx+1].text.strip()
                         if "Coord. Central Este" in txt and idx+1 < len(fila.cells): este = fila.cells[idx+1].text.strip()
                         if "Categoría" in txt and idx+1 < len(fila.cells): desc = fila.cells[idx+1].text.strip()

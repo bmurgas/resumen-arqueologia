@@ -10,6 +10,7 @@ import pandas as pd
 import zipfile
 import re
 import base64 
+import json # <--- NUEVA IMPORTACIÓN PARA QGIS
 from pyproj import Transformer
 from datetime import datetime
 import locale
@@ -60,7 +61,7 @@ def obtener_texto_celda_abajo(tabla, fila_idx, col_idx):
     return ""
 
 def limpiar_coordenada(texto):
-    texto_limpio = texto.replace(".", "").replace(" ", "").strip()
+    texto_limpio = str(texto).replace(".", "").replace(" ", "").strip()
     texto_limpio = texto_limpio.replace(",", ".")
     try:
         return float(texto_limpio)
@@ -267,7 +268,7 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
         for i, b in enumerate(bloques):
             txt = b[4].strip()
             
-            if "V. DESCRIPCIONES" in txt or "Descripción de la Actividad" in txt:
+            if "V. DESCRripciones" in txt or "Descripción de la Actividad" in txt:
                 capturando_descripcion = True
                 continue 
 
@@ -352,14 +353,10 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     return fichas
 
 # ==========================================
-# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL) - TEXTO LÓGICO + FIX
+# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL)
 # ==========================================
 
 def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
-    """
-    Extrae el texto del PDF de forma nativa. 
-    Contiene el parche específico para evitar el salto de Material/Superficie.
-    """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     except Exception as e:
@@ -370,8 +367,6 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
 
     for pagina in doc:
         texto_completo = pagina.get_text("text")
-        
-        # Limpiamos las líneas vacías
         lineas = [l.strip() for l in texto_completo.split('\n') if l.strip()]
         
         if len(lineas) < 10:
@@ -383,9 +378,7 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
             "UTM Norte": "", "UTM Este": "", "Material": "", "Superficie": ""
         }
 
-        # Recorremos la lista secuencial
         for i, linea in enumerate(lineas):
-            # Limpiamos dos puntos y pasamos a minúsculas para coincidencia exacta
             lin_lower = linea.lower().replace(":", "").strip()
 
             if lin_lower == "responsable":
@@ -395,7 +388,7 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
                 if i + 1 < len(lineas): ficha["Sitio"] = lineas[i+1]
             
             elif lin_lower == "hallazgo previsto":
-                pass # Se ignora aquí para que lo capture el sistema de seguridad (Regex) más abajo
+                pass # Se ignora, se captura abajo mediante Expresión Regular para 100% de precisión
             
             elif lin_lower == "cuadrante":
                 if i + 1 < len(lineas): ficha["Cuadrante"] = lineas[i+1]
@@ -408,7 +401,6 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
             
             elif lin_lower == "material":
                 if i + 1 < len(lineas):
-                    # Si el PDF agrupó las columnas, la palabra siguiente es el otro título. Saltamos 2 espacios.
                     if lineas[i+1].lower().replace(":", "").strip() == "superficie":
                         if i + 2 < len(lineas): ficha["Material"] = lineas[i+2]
                     else:
@@ -416,13 +408,11 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
             
             elif lin_lower == "superficie":
                 if i + 1 < len(lineas):
-                    # Si detecta la agrupación, salta el valor de material para tomar su propio valor
                     if i - 1 >= 0 and lineas[i-1].lower().replace(":", "").strip() == "material":
                         if i + 2 < len(lineas): ficha["Superficie"] = lineas[i+2]
                     else:
                         ficha["Superficie"] = lineas[i+1]
             
-            # Casos de coordenadas que pueden venir en la misma línea o en la de abajo
             elif lin_lower.startswith("utm norte"):
                 val = linea[len("UTM Norte"):].strip()
                 val = re.sub(r'^[:\-\s]+', '', val)
@@ -439,20 +429,19 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
                 elif i + 1 < len(lineas):
                     ficha["UTM Este"] = lineas[i+1]
 
-        # FASE DE LIMPIEZA: Si el código capturó un título de otra columna por error, lo vaciamos
+        # FASE DE LIMPIEZA
         etiquetas_conocidas = ["sitio", "responsable", "cuadrante", "dimensión", "dimension", "fecha", "material", "superficie", "coordenadas", "identificación", "procedencia y material cultural"]
-        
         for key in list(ficha.keys()):
             val_limpio = str(ficha[key]).lower().strip()
             if val_limpio in etiquetas_conocidas or val_limpio == key.lower():
                 ficha[key] = ""
 
-        # RESPALDOS DE SEGURIDAD (Usando Regex sobre el texto total)
+        # RESPALDOS DE SEGURIDAD
         if not ficha["Fecha"]:
             m = re.search(r"(\d{2}/\d{2}/\d{4})", texto_completo)
             if m: ficha["Fecha"] = m.group(1)
 
-        # Respaldo 100% seguro para el Hallazgo Previsto
+        # Buscar específicamente el ID del Hallazgo Previsto
         if not ficha["Hallazgo Previsto"] or len(ficha["Hallazgo Previsto"]) < 4:
             m = re.search(r"(HLU_HP_\d+|HP_\d+)", texto_completo)
             if m: ficha["Hallazgo Previsto"] = m.group(1)
@@ -762,19 +751,20 @@ elif opcion == "Generador Excel (Desde Word)":
             st.download_button("⬇️ Descargar Excel", buffer.getvalue(), "Resumen_Word_Excel.xlsx")
         else: st.error("No se encontraron datos.")
 
-# 2.2 Generador Excel (Recolección Superficial)
+# 2.2 Generador Excel (Recolección Superficial) - CON GENERADOR GIS INTEGRADO
 elif opcion == "Generador Excel (Recolección Superficial)":
-    st.title("Generador Excel (Recolección Superficial)")
-    st.markdown("Extrae datos específicos de las Fichas de Recolección Superficial en PDF para exportarlos a Excel.")
-    st.info("Columnas: Responsable, Sitio, Hallazgo Previsto, Cuadrante, Dimensión, Fecha, UTM Norte, UTM Este, Material, Superficie.")
+    st.title("Generador Base de Datos y GIS (Recolección Superficial)")
+    st.markdown("Extrae datos específicos de las Fichas de Recolección en PDF. Además, convierte las coordenadas UTM y genera archivos listos para QGIS y Google Earth.")
+    
     archivos = st.file_uploader("Subir Fichas PDF (.pdf)", accept_multiple_files=True, key="pdf_recoleccion_up")
-    if archivos and st.button("Generar Base de Datos Excel"):
+    if archivos and st.button("Procesar Fichas"):
         todas_las_fichas = []
         bar = st.progress(0)
         for i, a in enumerate(archivos):
             fichas_extraidas = procesar_pdf_recoleccion_superficial(a.read(), a.name)
             todas_las_fichas.extend(fichas_extraidas)
             bar.progress((i+1)/len(archivos))
+            
         if todas_las_fichas:
             columnas_ordenadas = [
                 "Responsable", "Sitio", "Hallazgo Previsto", "Cuadrante", 
@@ -783,15 +773,94 @@ elif opcion == "Generador Excel (Recolección Superficial)":
             df = pd.DataFrame(todas_las_fichas)[columnas_ordenadas]
             st.success(f"✅ Se extrajeron {len(df)} registros correctamente.")
             st.dataframe(df)
+            
+            # --- 1. PREPARAR EXCEL ---
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                 df.to_excel(writer, index=False, sheet_name="Hallazgos Previstos")
-            st.download_button(
-                label="⬇️ Descargar Excel", 
+            
+            # --- 2. PREPARAR GIS (KMZ Y GEOJSON) ---
+            kmz_buffer = None
+            geojson_str = None
+            try:
+                # Transformador de UTM 18S a Lat/Lon WGS84
+                transformer = Transformer.from_crs("epsg:32718", "epsg:4326", always_xy=True)
+                puntos_kml = []
+                features_geojson = []
+                
+                for f in todas_las_fichas:
+                    n_val = limpiar_coordenada(f.get("UTM Norte", ""))
+                    e_val = limpiar_coordenada(f.get("UTM Este", ""))
+                    
+                    if n_val and e_val:
+                        lon, lat = transformer.transform(e_val, n_val)
+                        nombre = f.get("Hallazgo Previsto", f.get("Sitio", "Sin ID"))
+                        desc = f"Material: {f.get('Material', '')} | Superficie: {f.get('Superficie', '')} | Fecha: {f.get('Fecha', '')}"
+                        
+                        # Guardar para KMZ
+                        puntos_kml.append({"nombre": nombre, "desc": desc, "lat": lat, "lon": lon})
+                        
+                        # Guardar para GeoJSON
+                        features_geojson.append({
+                            "type": "Feature",
+                            "properties": {
+                                "ID_Hallazgo": nombre,
+                                "Sitio": f.get("Sitio", ""),
+                                "Cuadrante": f.get("Cuadrante", ""),
+                                "Material": f.get("Material", ""),
+                                "Superficie": f.get("Superficie", ""),
+                                "Fecha": f.get("Fecha", "")
+                            },
+                            "geometry": {
+                                "type": "Point",
+                                "coordinates": [lon, lat]
+                            }
+                        })
+                        
+                # Construir archivos físicos si hubo coordenadas válidas
+                if puntos_kml:
+                    # KMZ
+                    kml_content = crear_kml_texto(puntos_kml)
+                    kmz_buffer = io.BytesIO()
+                    with zipfile.ZipFile(kmz_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                        zf.writestr("doc.kml", kml_content)
+                    kmz_buffer.seek(0)
+                    
+                    # GeoJSON (Nativo para QGIS)
+                    geojson_data = {
+                        "type": "FeatureCollection",
+                        "features": features_geojson
+                    }
+                    geojson_str = json.dumps(geojson_data)
+            except Exception as e:
+                st.warning("⚠️ No se pudieron procesar los archivos espaciales. Asegúrate de tener la librería 'pyproj' instalada.")
+
+            # --- 3. MOSTRAR BOTONES DE DESCARGA ---
+            st.markdown("### Descargas Disponibles")
+            col1, col2, col3 = st.columns(3)
+            
+            col1.download_button(
+                label="📊 Descargar Excel", 
                 data=buffer.getvalue(), 
                 file_name="Base_Datos_Recoleccion_Superficial.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+            
+            if kmz_buffer:
+                col2.download_button(
+                    label="🌍 Descargar KMZ (Google Earth)", 
+                    data=kmz_buffer.getvalue(), 
+                    file_name="Geometrias_Recoleccion.kmz",
+                    mime="application/vnd.google-earth.kmz"
+                )
+            
+            if geojson_str:
+                col3.download_button(
+                    label="🗺️ Descargar GeoJSON (Para QGIS)", 
+                    data=geojson_str, 
+                    file_name="Geometrias_Recoleccion.geojson",
+                    mime="application/geo+json"
+                )
         else:
             st.error("No se encontraron datos de recolección válidos en los PDFs subidos.")
 

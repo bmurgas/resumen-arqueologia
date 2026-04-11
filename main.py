@@ -240,6 +240,7 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     }
     
     capturando_descripcion = False
+    
     blacklist_clean = [
         "V. DESCRripciones", "V. DESCRIPCIONES", "Descripción de la Actividad", 
         "Huso", "18 G", "19 H", "Datum", "WGS84",
@@ -351,7 +352,7 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     return fichas
 
 # ==========================================
-# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL) - LÓGICA GEOMÉTRICA
+# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL) - COINCIDENCIA EXACTA
 # ==========================================
 
 def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
@@ -363,10 +364,8 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
 
     fichas = []
 
-    # Recorremos el documento página por página
     for pagina in doc:
         bloques = pagina.get_text("blocks")
-        # Filtramos bloques vacíos
         bloques = [b for b in bloques if b[4].strip()]
         if not bloques: continue
         
@@ -378,62 +377,72 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
             "UTM Norte": "", "UTM Este": "", "Material": "", "Superficie": ""
         }
 
-        # FUNCIÓN GEOMÉTRICA INFALIBLE: Mide coordenadas X e Y en la página
+        # FUNCIÓN GEOMÉTRICA CON COINCIDENCIA EXACTA
         def obtener_valor_visual(label, direccion="abajo"):
             bloque_label = None
             
             for b in bloques:
-                if label.lower() in b[4].lower():
-                    # Separar el bloque en líneas
-                    lineas = [l.strip() for l in b[4].split('\n') if l.strip()]
-                    for i, l in enumerate(lineas):
-                        if label.lower() in l.lower():
-                            # CASO 1: El valor está en la misma línea (Ej: "UTM Norte 5538910")
-                            idx = l.lower().find(label.lower()) + len(label)
-                            val = l[idx:].strip()
-                            val = re.sub(r'^[:\-\s]+', '', val) # Limpiar caracteres de inicio
-                            if val: return val
-                            
-                            # CASO 2: El valor está dentro del mismo cuadro de texto, abajo o arriba
-                            if direccion == "abajo" and i + 1 < len(lineas):
-                                return lineas[i+1]
-                            elif direccion == "arriba" and i - 1 >= 0:
-                                return lineas[i-1]
+                lineas = [l.strip() for l in b[4].split('\n') if l.strip()]
+                for i, l in enumerate(lineas):
+                    es_etiqueta_exacta = False
                     
-                    # Si solo estaba la etiqueta pura, guardamos el bloque para la búsqueda visual
-                    bloque_label = b
+                    # 1. COINCIDENCIA EXACTA: Evita confundir "Material" con "MATERIAL CULTURAL"
+                    if l.lower() == label.lower() or l.lower() == label.lower() + ":":
+                        es_etiqueta_exacta = True
+                    # Caso especial para las UTM que a veces vienen en la misma línea
+                    elif label.lower() in ["utm norte", "utm este"] and l.lower().startswith(label.lower()):
+                        es_etiqueta_exacta = True
+                        
+                    if es_etiqueta_exacta:
+                        # Si el dato está escrito en la misma línea (Ej: "UTM Norte 5538910")
+                        prefijo_len = len(label)
+                        if len(l) > prefijo_len + 1:
+                            resto = l[prefijo_len:].strip()
+                            resto = re.sub(r'^[:\-\s]+', '', resto)
+                            if resto: return resto
+                            
+                        # Si el dato está en la siguiente línea del MISMO bloque
+                        if direccion == "abajo" and i + 1 < len(lineas):
+                            return lineas[i+1]
+                        elif direccion == "arriba" and i - 1 >= 0:
+                            return lineas[i-1]
+                            
+                        # Si el dato está en un bloque separado, guardamos este bloque para buscarlo
+                        bloque_label = b
+                        break
+                if bloque_label:
                     break
             
             if not bloque_label: return ""
 
-            # CASO 3: El valor está en OTRO cuadro de texto distinto.
-            lx0, ly0, lx1, ly1 = bloque_label[:4] # Coordenadas del título
+            # Si el valor está en un bloque distinto, lo buscamos usando coordenadas (misma columna visual)
+            lx0, ly0, lx1, ly1 = bloque_label[:4]
             candidatos = []
             
             for b in bloques:
                 if b == bloque_label: continue
                 bx0, by0, bx1, by1, btxt = b[:5]
                 
-                # REGLA DE ORO: Debe estar en la misma columna vertical (Mismo margen izquierdo +- 60 pixeles)
+                # Tolerancia de columna (Debe estar alineado verticalmente)
                 if abs(bx0 - lx0) < 60:
-                    if direccion == "abajo" and by0 >= ly0 - 5: # Está abajo
+                    if direccion == "abajo" and by0 >= ly0 - 5: 
                         candidatos.append((by0, btxt.strip().split('\n')[0]))
-                    elif direccion == "arriba" and by1 <= ly1 + 5: # Está arriba
+                    elif direccion == "arriba" and by1 <= ly1 + 5: 
                         candidatos.append((by1, btxt.strip().split('\n')[-1]))
                         
             if candidatos:
                 if direccion == "abajo":
-                    candidatos.sort(key=lambda x: x[0]) # Ordenar los de abajo, el más cercano primero
+                    candidatos.sort(key=lambda x: x[0]) 
                 else:
-                    candidatos.sort(key=lambda x: x[0], reverse=True) # Ordenar los de arriba
+                    candidatos.sort(key=lambda x: x[0], reverse=True) 
                 return candidatos[0][1]
                 
             return ""
 
-        # APLICAR EXTRACCIÓN USANDO GEOMETRÍA VISUAL
+        # EXTRACCIÓN PROTEGIDA (Usa la función que acabamos de definir)
         ficha["Responsable"] = obtener_valor_visual("Responsable", "abajo")
         ficha["Sitio"] = obtener_valor_visual("Sitio", "abajo")
-        ficha["Hallazgo Previsto"] = obtener_valor_visual("Hallazgo Previsto", "arriba") # <--- Este va hacia arriba
+        ficha["Hallazgo Previsto"] = obtener_valor_visual("Hallazgo Previsto", "arriba") # <--- Se busca hacia arriba
         ficha["Cuadrante"] = obtener_valor_visual("Cuadrante", "abajo")
         ficha["Dimensión"] = obtener_valor_visual("Dimensión", "abajo")
         ficha["Material"] = obtener_valor_visual("Material", "abajo")
@@ -442,21 +451,21 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
         ficha["UTM Norte"] = obtener_valor_visual("UTM Norte", "abajo")
         ficha["UTM Este"] = obtener_valor_visual("UTM Este", "abajo")
 
-        # RESPALDOS DE SEGURIDAD (Por si el PDF viene con formato extraño)
-        if not ficha["Fecha"] or "fecha" in ficha["Fecha"].lower():
+        # RESPALDOS DE SEGURIDAD
+        if not ficha["Fecha"]:
             m = re.search(r"(\d{2}/\d{2}/\d{4})", txt_pag)
             if m: ficha["Fecha"] = m.group(1)
 
-        if not ficha["Hallazgo Previsto"] or "hallazgo" in ficha["Hallazgo Previsto"].lower() or len(ficha["Hallazgo Previsto"]) < 4:
+        if not ficha["Hallazgo Previsto"] or len(ficha["Hallazgo Previsto"]) < 4:
             m = re.search(r"(HLU_HP_\d+|HP_\d+)", txt_pag)
             if m: ficha["Hallazgo Previsto"] = m.group(1)
 
-        # Evitar errores donde el valor se copia a sí mismo como título (Ej: "Material" = "Material")
+        # Evitar auto-referencias por si la extracción falla
         for k in ficha:
             if ficha[k].lower() == k.lower():
                 ficha[k] = ""
 
-        if ficha["Sitio"] or ficha["Hallazgo Previsto"]:
+        if ficha["Sitio"] or ficha["Responsable"]:
             fichas.append(ficha)
 
     return fichas

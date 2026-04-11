@@ -352,7 +352,7 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     return fichas
 
 # ==========================================
-# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL) - VISIÓN ESPACIAL STRICTA
+# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL) - VISIÓN ESTRICTA Y SEGURA
 # ==========================================
 
 def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
@@ -368,12 +368,12 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
         dict_data = pagina.get_text("dict")
         elementos = []
         
-        # Desarmamos el PDF en "Cajas de texto" con coordenadas exactas
+        # Desarmamos el PDF capturando CADA LÍNEA con sus coordenadas X e Y
         for b in dict_data.get("blocks", []):
             if b.get("type") == 0:  
                 for l in b.get("lines", []):
                     txt = " ".join([s.get("text", "") for s in l.get("spans", [])]).strip()
-                    txt = re.sub(r'\s+', ' ', txt) # Limpiar dobles espacios
+                    txt = re.sub(r'\s+', ' ', txt)
                     if txt:
                         x0, y0, x1, y1 = l.get("bbox")
                         elementos.append({
@@ -390,11 +390,11 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
             "UTM Norte": "", "UTM Este": "", "Material": "", "Superficie": ""
         }
         
-        # EL MOTOR ESPACIAL ESTRICTO
+        # EL MOTOR ESPACIAL ESTRICTO (Mezcla de la V4 con Anti-Misma-Línea)
         def buscar_valor(label, direccion="abajo"):
             target = None
             
-            # 1. Encontrar la etiqueta exacta
+            # Buscar coincidencia exacta del título
             for el in elementos:
                 clean_text = el["text"].lower().replace(':', '').strip()
                 if clean_text == label.lower():
@@ -405,64 +405,63 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
 
             candidatos = []
             
-            # 2. Buscar quién es el texto que le corresponde
             for el in elementos:
                 if el == target: continue
                 
-                # REGLA 1: Deben estar en la misma columna visual.
-                # Permitimos un solapamiento del texto o una diferencia de margen izquierdo muy baja (60px)
-                alineado_x = abs(el["x0"] - target["x0"]) < 60 or \
-                             (el["x0"] <= target["x1"] and el["x1"] >= target["x0"])
+                # REGLA 1: COLUMNA (Estar alineado verticalmente a la etiqueta)
+                # Tolerancia generosa para abarcar indentaciones (80px) o si están centrados
+                centro_target = (target["x0"] + target["x1"]) / 2
+                centro_el = (el["x0"] + el["x1"]) / 2
+                
+                alineado_x = abs(el["x0"] - target["x0"]) < 80 or abs(centro_el - centro_target) < 80
                 
                 if not alineado_x: continue
                 
-                # REGLA 2: Ignorar la misma línea.
-                # Si buscamos "abajo", el texto candidato debe estar físicamente DEBAJO DE LA BASE de la etiqueta.
+                # REGLA 2: ANTI MISMA LÍNEA (El secreto para que Cuadrante no lea Dimensión)
                 if direccion == "abajo":
-                    if el["y0"] >= target["y1"] - 5: 
+                    # El texto candidato debe empezar ESTRICTAMENTE por debajo de la etiqueta
+                    if el["y0"] > target["y0"] + 5: 
                         candidatos.append(el)
                 
-                # Si buscamos "arriba", el texto candidato debe estar físicamente ARRIBA DEL TECHO de la etiqueta.
                 elif direccion == "arriba":
-                    if el["y1"] <= target["y0"] + 5:
+                    # El texto candidato debe empezar ESTRICTAMENTE por encima de la etiqueta
+                    if el["y1"] < target["y1"] - 5:
                         candidatos.append(el)
             
-            # 3. Escoger el ganador (el más cercano)
             if candidatos:
+                # Elegir al ganador: el que esté visualmente más cerca de la etiqueta
                 if direccion == "abajo":
-                    candidatos.sort(key=lambda x: x["y0"]) # El menor y0 es el más pegado a la etiqueta bajando
+                    candidatos.sort(key=lambda x: x["y0"]) 
                 else:
-                    candidatos.sort(key=lambda x: x["y1"], reverse=True) # El mayor y1 es el más pegado a la etiqueta subiendo
+                    candidatos.sort(key=lambda x: x["y1"], reverse=True) 
                 
                 return candidatos[0]["text"]
                 
             return ""
 
-        # FUNCIÓN ESPECIAL PARA UTM:
+        # Función de respaldo para las UTM en caso de que vengan en la misma línea
         def buscar_utm(label):
             for el in elementos:
-                # Caso: Viene todo pegado "UTM Norte 5538910"
                 if el["text"].lower().startswith(label.lower()):
                     val = el["text"][len(label):].strip()
                     val = re.sub(r'^[:\-\s]+', '', val)
                     if val: return val
-            # Caso: "UTM Norte" está en un lado, y "5538910" está en la caja de abajo
             return buscar_valor(label, "abajo")
 
-        # EXTRACCIÓN PROTEGIDA CONTRA CRUCE DE LÍNEAS
+        # EJECUCIÓN 
         ficha["Responsable"] = buscar_valor("Responsable", "abajo")
         ficha["Sitio"] = buscar_valor("Sitio", "abajo")
-        ficha["Hallazgo Previsto"] = buscar_valor("Hallazgo Previsto", "arriba") # Se extrae hacia ARRIBA
+        ficha["Hallazgo Previsto"] = buscar_valor("Hallazgo Previsto", "arriba") # Se busca hacia arriba
         ficha["Cuadrante"] = buscar_valor("Cuadrante", "abajo")
         ficha["Dimensión"] = buscar_valor("Dimensión", "abajo")
-        if not ficha["Dimensión"]: ficha["Dimensión"] = buscar_valor("Dimension", "abajo")
+        if not ficha["Dimensión"]: ficha["Dimensión"] = buscar_valor("Dimension", "abajo") # Respaldo sin tilde
         ficha["Fecha"] = buscar_valor("Fecha", "abajo")
         ficha["Material"] = buscar_valor("Material", "abajo")
         ficha["Superficie"] = buscar_valor("Superficie", "abajo")
         ficha["UTM Norte"] = buscar_utm("UTM Norte")
         ficha["UTM Este"] = buscar_utm("UTM Este")
 
-        # RESPALDOS DE SEGURIDAD (Por si algo del formato interno fallara)
+        # RESPALDOS FINALES
         txt_pag = pagina.get_text("text")
         if not ficha["Fecha"]:
             m = re.search(r"(\d{2}/\d{2}/\d{4})", txt_pag)
@@ -472,7 +471,7 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
             m = re.search(r"(HLU_HP_\d+|HP_\d+)", txt_pag)
             if m: ficha["Hallazgo Previsto"] = m.group(1)
 
-        # LIMPIEZA FINAL: Evitar que una etiqueta se copie a sí misma
+        # LIMPIEZA: Si capturó un título por error, se borra.
         for k in ficha:
             if ficha[k].lower().replace(':', '').strip() == k.lower():
                 ficha[k] = ""

@@ -240,7 +240,6 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     }
     
     capturando_descripcion = False
-    
     blacklist_clean = [
         "V. DESCRripciones", "V. DESCRIPCIONES", "Descripción de la Actividad", 
         "Huso", "18 G", "19 H", "Datum", "WGS84",
@@ -352,15 +351,10 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     return fichas
 
 # ==========================================
-# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL)
+# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL) - LÓGICA GEOMÉTRICA
 # ==========================================
 
 def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
-    """
-    Lee el PDF plano línea por línea.
-    Dado que el PDF exporta el texto exactamente en el orden lógico que leemos, 
-    extraeremos la línea i+1 (abajo) o i-1 (arriba) sin intentar cruzar columnas.
-    """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     except Exception as e:
@@ -369,64 +363,100 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
 
     fichas = []
 
-    # Procesamos página por página (cada página es una ficha distinta)
+    # Recorremos el documento página por página
     for pagina in doc:
-        # Obtenemos el texto de forma plana y natural
-        texto_completo = pagina.get_text("text")
+        bloques = pagina.get_text("blocks")
+        # Filtramos bloques vacíos
+        bloques = [b for b in bloques if b[4].strip()]
+        if not bloques: continue
         
-        # Limpiamos líneas vacías
-        lineas = [l.strip() for l in texto_completo.split('\n') if l.strip()]
-        
-        if len(lineas) < 10:
-            continue
-            
+        txt_pag = pagina.get_text("text")
+
         ficha = {
             "Responsable": "", "Sitio": "", "Hallazgo Previsto": "",
             "Cuadrante": "", "Dimensión": "", "Fecha": "",
             "UTM Norte": "", "UTM Este": "", "Material": "", "Superficie": ""
         }
 
-        # Recorremos cada línea buscando los títulos exactos
-        for i, linea in enumerate(lineas):
+        # FUNCIÓN GEOMÉTRICA INFALIBLE: Mide coordenadas X e Y en la página
+        def obtener_valor_visual(label, direccion="abajo"):
+            bloque_label = None
             
-            if linea == "Responsable" and i + 1 < len(lineas):
-                ficha["Responsable"] = lineas[i+1]
+            for b in bloques:
+                if label.lower() in b[4].lower():
+                    # Separar el bloque en líneas
+                    lineas = [l.strip() for l in b[4].split('\n') if l.strip()]
+                    for i, l in enumerate(lineas):
+                        if label.lower() in l.lower():
+                            # CASO 1: El valor está en la misma línea (Ej: "UTM Norte 5538910")
+                            idx = l.lower().find(label.lower()) + len(label)
+                            val = l[idx:].strip()
+                            val = re.sub(r'^[:\-\s]+', '', val) # Limpiar caracteres de inicio
+                            if val: return val
+                            
+                            # CASO 2: El valor está dentro del mismo cuadro de texto, abajo o arriba
+                            if direccion == "abajo" and i + 1 < len(lineas):
+                                return lineas[i+1]
+                            elif direccion == "arriba" and i - 1 >= 0:
+                                return lineas[i-1]
+                    
+                    # Si solo estaba la etiqueta pura, guardamos el bloque para la búsqueda visual
+                    bloque_label = b
+                    break
             
-            elif linea == "Sitio" and i + 1 < len(lineas):
-                ficha["Sitio"] = lineas[i+1]
-            
-            # ¡Dato especial! El ID del hallazgo aparece justo ANTES de la palabra "Hallazgo Previsto"
-            elif linea == "Hallazgo Previsto" and i - 1 >= 0:
-                ficha["Hallazgo Previsto"] = lineas[i-1]
-            
-            elif linea == "Cuadrante" and i + 1 < len(lineas):
-                ficha["Cuadrante"] = lineas[i+1]
-            
-            elif linea == "Dimensión" and i + 1 < len(lineas):
-                ficha["Dimensión"] = lineas[i+1]
-            
-            elif linea == "Fecha" and i + 1 < len(lineas):
-                ficha["Fecha"] = lineas[i+1]
-            
-            # A veces viene en la misma línea: "UTM Norte 5538910"
-            elif linea.startswith("UTM Norte"):
-                val = linea.replace("UTM Norte", "").strip()
-                if val:
-                    ficha["UTM Norte"] = val
-                elif i + 1 < len(lineas):
-                    ficha["UTM Norte"] = lineas[i+1]
-            
-            elif linea == "UTM Este" and i + 1 < len(lineas):
-                ficha["UTM Este"] = lineas[i+1]
-            
-            elif linea == "Material" and i + 1 < len(lineas):
-                ficha["Material"] = lineas[i+1]
-            
-            elif linea == "Superficie" and i + 1 < len(lineas):
-                ficha["Superficie"] = lineas[i+1]
+            if not bloque_label: return ""
 
-        # Si capturamos al menos el Sitio o el Responsable, guardamos la ficha
-        if ficha["Sitio"] or ficha["Responsable"]:
+            # CASO 3: El valor está en OTRO cuadro de texto distinto.
+            lx0, ly0, lx1, ly1 = bloque_label[:4] # Coordenadas del título
+            candidatos = []
+            
+            for b in bloques:
+                if b == bloque_label: continue
+                bx0, by0, bx1, by1, btxt = b[:5]
+                
+                # REGLA DE ORO: Debe estar en la misma columna vertical (Mismo margen izquierdo +- 60 pixeles)
+                if abs(bx0 - lx0) < 60:
+                    if direccion == "abajo" and by0 >= ly0 - 5: # Está abajo
+                        candidatos.append((by0, btxt.strip().split('\n')[0]))
+                    elif direccion == "arriba" and by1 <= ly1 + 5: # Está arriba
+                        candidatos.append((by1, btxt.strip().split('\n')[-1]))
+                        
+            if candidatos:
+                if direccion == "abajo":
+                    candidatos.sort(key=lambda x: x[0]) # Ordenar los de abajo, el más cercano primero
+                else:
+                    candidatos.sort(key=lambda x: x[0], reverse=True) # Ordenar los de arriba
+                return candidatos[0][1]
+                
+            return ""
+
+        # APLICAR EXTRACCIÓN USANDO GEOMETRÍA VISUAL
+        ficha["Responsable"] = obtener_valor_visual("Responsable", "abajo")
+        ficha["Sitio"] = obtener_valor_visual("Sitio", "abajo")
+        ficha["Hallazgo Previsto"] = obtener_valor_visual("Hallazgo Previsto", "arriba") # <--- Este va hacia arriba
+        ficha["Cuadrante"] = obtener_valor_visual("Cuadrante", "abajo")
+        ficha["Dimensión"] = obtener_valor_visual("Dimensión", "abajo")
+        ficha["Material"] = obtener_valor_visual("Material", "abajo")
+        ficha["Superficie"] = obtener_valor_visual("Superficie", "abajo")
+        ficha["Fecha"] = obtener_valor_visual("Fecha", "abajo")
+        ficha["UTM Norte"] = obtener_valor_visual("UTM Norte", "abajo")
+        ficha["UTM Este"] = obtener_valor_visual("UTM Este", "abajo")
+
+        # RESPALDOS DE SEGURIDAD (Por si el PDF viene con formato extraño)
+        if not ficha["Fecha"] or "fecha" in ficha["Fecha"].lower():
+            m = re.search(r"(\d{2}/\d{2}/\d{4})", txt_pag)
+            if m: ficha["Fecha"] = m.group(1)
+
+        if not ficha["Hallazgo Previsto"] or "hallazgo" in ficha["Hallazgo Previsto"].lower() or len(ficha["Hallazgo Previsto"]) < 4:
+            m = re.search(r"(HLU_HP_\d+|HP_\d+)", txt_pag)
+            if m: ficha["Hallazgo Previsto"] = m.group(1)
+
+        # Evitar errores donde el valor se copia a sí mismo como título (Ej: "Material" = "Material")
+        for k in ficha:
+            if ficha[k].lower() == k.lower():
+                ficha[k] = ""
+
+        if ficha["Sitio"] or ficha["Hallazgo Previsto"]:
             fichas.append(ficha)
 
     return fichas

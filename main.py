@@ -94,7 +94,7 @@ def procesar_archivo_v12(archivo_bytes, nombre_archivo):
             texto_fila = " ".join([c.text.strip() for c in fila.cells]).strip()
             
             if "Fecha" in texto_fila:
-                for celda in fila.cells:
+                for celda in cells:
                     t = celda.text.strip()
                     if "Fecha" not in t and len(t) > 5:
                         datos_ficha["fecha_propia"] = t
@@ -671,10 +671,15 @@ def obtener_puntos_geograficos_con_foto(archivos):
     return puntos_acumulados
 
 # ==========================================
-# 6. LÓGICA NUEVA: MODIFICAR PDF (EL PARCHE VISUAL)
+# 6. LÓGICA NUEVA: MODIFICAR PDF (REESCRITURA CON AUTO-AJUSTE)
 # ==========================================
 
 def modificar_pdf_agregar_texto(pdf_bytes, texto_a_agregar):
+    """
+    Solución Definitiva: Extrae el párrafo, borra el original sin tocar las líneas
+    de la tabla, y reescribe el texto fusionado con un tamaño de fuente menor 
+    para que se adapte perfectamente al recuadro existente.
+    """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         
@@ -683,82 +688,82 @@ def modificar_pdf_agregar_texto(pdf_bytes, texto_a_agregar):
             bloques = dict_data.get("blocks", [])
             bloques.sort(key=lambda b: b.get("bbox", [0, 0, 0, 0])[1])
             
-            target_block = None
+            en_descripcion = False
+            target_lines = []
+            y_fin_celda = pagina.rect.height
             
-            for i, b in enumerate(bloques):
-                if b.get("type") == 0:
-                    texto_bloque = "".join([s["text"] for l in b.get("lines", []) for s in l.get("spans", [])]).strip()
-                    if "Descripción de la Actividad" in texto_bloque or "V. DESCRIPCIONES" in texto_bloque:
-                        if len(texto_bloque) > 60:
-                            target_block = b
-                            break
-                        else:
-                            for j in range(i+1, len(bloques)):
-                                if bloques[j].get("type") == 0:
-                                    target_block = bloques[j]
-                                    break
-                            break
+            # 1. Identificar estrictamente las líneas del párrafo a modificar
+            for b in bloques:
+                if b.get("type") != 0: continue
+                texto_bloque = "".join([s["text"] for l in b.get("lines", []) for s in l.get("spans", [])]).strip()
+                
+                if "Descripción de la Actividad" in texto_bloque or "V. DESCRIPCIONES" in texto_bloque:
+                    en_descripcion = True
+                    for l in b.get("lines", []):
+                        line_text = "".join([s["text"] for s in l.get("spans", [])]).strip()
+                        # Ignorar el título en sí mismo para no borrarlo
+                        if "Descripción de la Actividad" not in line_text and "V. DESCRIPCIONES" not in line_text and len(line_text) > 2:
+                            target_lines.append(l)
+                    continue
+                    
+                if en_descripcion:
+                    # Si chocamos con la siguiente sección de la ficha, ahí termina nuestra celda
+                    if "Presencia de Hallazgos" in texto_bloque or "VI. CARACTERÍSTICAS" in texto_bloque:
+                        y_fin_celda = b["bbox"][1] - 3 
+                        break
+                    else:
+                        for l in b.get("lines", []):
+                            target_lines.append(l)
             
-            if target_block:
-                lines = target_block.get("lines", [])
-                if not lines: continue
-                last_line = lines[-1]
-                spans = last_line.get("spans", [])
-                if not spans: continue
-                last_span = spans[-1]
+            if target_lines:
+                # 2. Rescatar el texto original y sus coordenadas
+                textos = []
+                x0_min = 9999
+                x1_max = 0
+                y0_min = 9999
                 
-                font_size = last_span.get("size", 9)
-                if font_size < 5 or font_size > 14: font_size = 9
+                for l in target_lines:
+                    line_text = " ".join([s["text"] for s in l.get("spans", [])]).strip()
+                    textos.append(line_text)
+                    
+                    x0_min = min(x0_min, l["bbox"][0])
+                    x1_max = max(x1_max, l["bbox"][2])
+                    y0_min = min(y0_min, l["bbox"][1])
+                    
+                texto_original = " ".join(textos)
+                texto_original = re.sub(r'\s+', ' ', texto_original) 
                 
-                # Inicia a escribir justo después de la última palabra original
-                x_curr = last_span["bbox"][2] + 4 
-                baseline_y = last_span["origin"][1]
-                line_height = font_size * 1.2
+                # Texto fusionado
+                texto_final = texto_original + " " + texto_a_agregar
                 
-                # Definir los bordes de la caja
-                margin_left = lines[0]["bbox"][0]
-                margin_right = max([l["bbox"][2] for l in lines])
-                if margin_right < margin_left + 100: 
-                    margin_right = pagina.rect.width - 50 # Seguridad
+                # 3. PINTAR DE BLANCO sobre el texto original (borrado láser línea a línea)
+                for l in target_lines:
+                    rect_borrar = fitz.Rect(l["bbox"])
+                    # Expandimos un píxel para borrar la tinta por completo sin afectar las tablas
+                    rect_borrar.x0 -= 2
+                    rect_borrar.y0 -= 1
+                    rect_borrar.x1 += 2
+                    rect_borrar.y1 += 1
+                    pagina.draw_rect(rect_borrar, color=(1, 1, 1), fill=(1, 1, 1))
+                    
+                # 4. Definir la zona segura (la celda vacía)
+                margen_derecho = max(x1_max, pagina.rect.width - 50)
+                if margen_derecho < x0_min + 150: 
+                    margen_derecho = pagina.rect.width - 50
+                    
+                rect_escritura = fitz.Rect(x0_min, y0_min, margen_derecho, y_fin_celda)
                 
-                # --- EL TRUCO VISUAL (PARCHE) ---
-                # 1. Dibujar rectángulo blanco para borrar la línea inferior
-                y_borrar_inicio = last_span["bbox"][3] - 2
-                y_borrar_fin = y_borrar_inicio + 40 # Borra 40 pixeles hacia abajo
-                rect_blanco = fitz.Rect(margin_left - 10, y_borrar_inicio, margin_right + 10, y_borrar_fin)
-                pagina.draw_rect(rect_blanco, color=(1, 1, 1), fill=(1, 1, 1))
-
-                # 2. Insertar el texto línea a línea
-                words = texto_a_agregar.split(" ")
-                max_y_alcanzado = baseline_y
-                
-                for word in words:
-                    word_len = fitz.get_text_length(word + " ", fontname="helv", fontsize=font_size)
-                    # Si choca con el borde derecho, salta de línea
-                    if x_curr + word_len > margin_right:
-                        x_curr = margin_left
-                        baseline_y += line_height
-                        max_y_alcanzado = baseline_y
-                        
-                    pagina.insert_text(
-                        fitz.Point(x_curr, baseline_y), 
-                        word + " ", 
-                        fontname="helv", 
-                        fontsize=font_size, 
-                        color=(0,0,0)
-                    )
-                    x_curr += word_len
-                
-                # 3. Dibujar de nuevo las líneas para "cerrar" el cuadro más abajo
-                y_linea_final = max_y_alcanzado + (font_size * 0.7)
-                
-                # Línea base
-                pagina.draw_line(fitz.Point(margin_left - 5, y_linea_final), fitz.Point(margin_right + 5, y_linea_final), color=(0,0,0), width=0.5)
-                # Línea lateral izquierda
-                pagina.draw_line(fitz.Point(margin_left - 5, y_borrar_inicio), fitz.Point(margin_left - 5, y_linea_final), color=(0,0,0), width=0.5)
-                # Línea lateral derecha
-                pagina.draw_line(fitz.Point(margin_right + 5, y_borrar_inicio), fitz.Point(margin_right + 5, y_linea_final), color=(0,0,0), width=0.5)
-
+                # 5. Reescribir el texto adaptando el tamaño
+                # Un tamaño 8.0 es lo suficientemente pequeño para añadir una frase extra
+                # manteniendo la armonía del documento original.
+                pagina.insert_textbox(
+                    rect_escritura, 
+                    texto_final, 
+                    fontsize=8.0, 
+                    fontname="helv", 
+                    color=(0,0,0),
+                    align=0 # Justificado a la izquierda
+                )
                 break 
                 
         buffer = io.BytesIO()

@@ -10,7 +10,7 @@ import pandas as pd
 import zipfile
 import re
 import base64 
-import json # <--- NUEVA IMPORTACIÓN PARA QGIS
+import json 
 from pyproj import Transformer
 from datetime import datetime
 import locale
@@ -268,7 +268,7 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
         for i, b in enumerate(bloques):
             txt = b[4].strip()
             
-            if "V. DESCRripciones" in txt or "Descripción de la Actividad" in txt:
+            if "V. DESCRripciones" in txt or "Descripción de la Actividad" in txt or "V. DESCRIPCIONES" in txt:
                 capturando_descripcion = True
                 continue 
 
@@ -388,7 +388,7 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
                 if i + 1 < len(lineas): ficha["Sitio"] = lineas[i+1]
             
             elif lin_lower == "hallazgo previsto":
-                pass # Se ignora, se captura abajo mediante Expresión Regular para 100% de precisión
+                pass # Se ignora aquí para que lo capture el sistema de seguridad (Regex) más abajo
             
             elif lin_lower == "cuadrante":
                 if i + 1 < len(lineas): ficha["Cuadrante"] = lineas[i+1]
@@ -401,6 +401,7 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
             
             elif lin_lower == "material":
                 if i + 1 < len(lineas):
+                    # Salto de columna
                     if lineas[i+1].lower().replace(":", "").strip() == "superficie":
                         if i + 2 < len(lineas): ficha["Material"] = lineas[i+2]
                     else:
@@ -408,6 +409,7 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
             
             elif lin_lower == "superficie":
                 if i + 1 < len(lineas):
+                    # Salto de columna inverso
                     if i - 1 >= 0 and lineas[i-1].lower().replace(":", "").strip() == "material":
                         if i + 2 < len(lineas): ficha["Superficie"] = lineas[i+2]
                     else:
@@ -441,7 +443,6 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
             m = re.search(r"(\d{2}/\d{2}/\d{4})", texto_completo)
             if m: ficha["Fecha"] = m.group(1)
 
-        # Buscar específicamente el ID del Hallazgo Previsto
         if not ficha["Hallazgo Previsto"] or len(ficha["Hallazgo Previsto"]) < 4:
             m = re.search(r"(HLU_HP_\d+|HP_\d+)", texto_completo)
             if m: ficha["Hallazgo Previsto"] = m.group(1)
@@ -674,6 +675,65 @@ def obtener_puntos_geograficos_con_foto(archivos):
     return puntos_acumulados
 
 # ==========================================
+# 6. LÓGICA NUEVA: MODIFICAR PDF (AGREGAR TEXTO)
+# ==========================================
+
+def modificar_pdf_agregar_texto(pdf_bytes, texto_a_agregar):
+    """
+    Busca la sección 'Descripción de la Actividad' y agrega el texto especificado al final de ese bloque.
+    """
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        
+        for pagina in doc:
+            bloques = pagina.get_text("blocks")
+            bloques.sort(key=lambda b: b[1])  # Ordenar por coordenada Y (de arriba hacia abajo)
+            
+            y_insert = None
+            x_insert = 50  # Margen izquierdo predeterminado
+            
+            # Buscar el bloque de la "Descripción de la Actividad"
+            for i, b in enumerate(bloques):
+                texto_bloque = b[4].strip()
+                if "Descripción de la Actividad" in texto_bloque or "V. DESCRIPCIONES" in texto_bloque:
+                    # Si el bloque tiene mucho texto, asumimos que es el párrafo completo
+                    if len(texto_bloque) > 60:
+                        y_insert = b[3] + 5  # y1 del bloque + pequeño margen
+                        x_insert = b[0]      # Alinear con el margen izquierdo de este texto
+                        break
+                    else:
+                        # Si es solo el título, tomamos el bloque de texto que le sigue (el párrafo)
+                        if i + 1 < len(bloques):
+                            y_insert = bloques[i+1][3] + 5
+                            x_insert = bloques[i+1][0]
+                        break
+            
+            if y_insert:
+                # Definir la "caja" donde se insertará el nuevo texto
+                # Calculamos el ancho de la página para no salirnos de los márgenes
+                ancho_pagina = pagina.rect.width
+                rect_insert = fitz.Rect(x_insert, y_insert, ancho_pagina - 50, y_insert + 50)
+                
+                # Insertar el texto con fuente Helvetica, tamaño 10, color negro (0,0,0)
+                pagina.insert_textbox(
+                    rect_insert, 
+                    texto_a_agregar, 
+                    fontsize=10, 
+                    fontname="helv", 
+                    color=(0, 0, 0),
+                    align=0  # Alinear a la izquierda
+                )
+                break  # Solo agregamos en la primera aparición
+                
+        buffer = io.BytesIO()
+        doc.save(buffer)
+        return buffer.getvalue()
+        
+    except Exception as e:
+        st.error(f"Error modificando PDF: {e}")
+        return None
+
+# ==========================================
 #          MENÚ LATERAL
 # ==========================================
 
@@ -685,7 +745,8 @@ opcion = st.sidebar.radio("Herramientas:", [
     "Generador Excel (Recolección Superficial)",
     "Generador Fichas (Desde Word)",
     "Generador KMZ (Georreferenciación)",
-    "Visor de Mapa Interactivo"
+    "Visor de Mapa Interactivo",
+    "Modificar PDF (Agregar Texto)" # <--- NUEVO MÓDULO AGREGADO
 ])
 
 # 1. Generador Word (MAP - Desde Word)
@@ -984,3 +1045,28 @@ elif opcion == "Visor de Mapa Interactivo":
             ).add_to(m)
         
         st_folium(m, width=900, height=600)
+
+# 6. Modificar PDF (Agregar Texto)
+elif opcion == "Modificar PDF (Agregar Texto)":
+    st.title("Modificar PDF: Agregar Ley 17.288")
+    st.markdown("Agrega automáticamente un texto estándar al final del párrafo de 'Descripción de la Actividad'.")
+    
+    # Caja de texto editable para el usuario
+    texto_por_defecto = "Durante la jornada no se identifican hallazgos arqueológicos afectos a la ley 17.288."
+    texto_usuario = st.text_input("Texto a insertar:", value=texto_por_defecto)
+    
+    archivos_pdf = st.file_uploader("Subir PDFs para modificar", accept_multiple_files=True, key="pdf_modify_up")
+    
+    if archivos_pdf and st.button("Procesar y Modificar PDFs"):
+        for pdf_file in archivos_pdf:
+            pdf_modificado_bytes = modificar_pdf_agregar_texto(pdf_file.read(), texto_usuario)
+            
+            if pdf_modificado_bytes:
+                st.success(f"✅ Archivo modificado: {pdf_file.name}")
+                st.download_button(
+                    label=f"⬇️ Descargar {pdf_file.name} modificado", 
+                    data=pdf_modificado_bytes, 
+                    file_name=f"Modificado_{pdf_file.name}",
+                    mime="application/pdf",
+                    key=f"btn_{pdf_file.name}"
+                )

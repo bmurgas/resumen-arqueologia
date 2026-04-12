@@ -10,6 +10,7 @@ try:
 except ImportError:
     pass
 
+# --- Funciones Auxiliares solo para este módulo ---
 def limpiar_coordenada(texto):
     texto_limpio = str(texto).replace(".", "").replace(" ", "").strip()
     texto_limpio = texto_limpio.replace(",", ".")
@@ -38,6 +39,7 @@ def crear_kml_texto(puntos):
     </Placemark>"""
     return kml_header + kml_body + kml_footer
 
+# --- LA LÓGICA CORRECTA DE EXTRACCIÓN (Línea por línea + Saltos) ---
 def procesar_pdf_recoleccion_regex_gis(pdf_bytes, nombre_archivo):
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -46,10 +48,13 @@ def procesar_pdf_recoleccion_regex_gis(pdf_bytes, nombre_archivo):
         return []
 
     fichas = []
+
     for pagina in doc:
-        texto = pagina.get_text("text")
+        texto_completo = pagina.get_text("text")
+        # Leemos línea por línea
+        lineas = [l.strip() for l in texto_completo.split('\n') if l.strip()]
         
-        if "Sitio" not in texto and "Responsable" not in texto:
+        if len(lineas) < 10:
             continue
 
         ficha = {
@@ -58,65 +63,86 @@ def procesar_pdf_recoleccion_regex_gis(pdf_bytes, nombre_archivo):
             "UTM Norte": "", "UTM Este": "", "Material": "", "Superficie": ""
         }
 
-        m = re.search(r"Sitio\s*\n+([^\n]+)", texto)
-        if m: ficha["Sitio"] = m.group(1).strip()
-        
-        m = re.search(r"Cuadrante\s*\n+([^\n]+)", texto)
-        if m: ficha["Cuadrante"] = m.group(1).strip()
+        # Bucle de lectura secuencial que armamos ayer
+        for i, linea in enumerate(lineas):
+            lin_lower = linea.lower().replace(":", "").strip()
 
-        m = re.search(r"Responsable\s*\n+([^\n]+)", texto)
-        if m: ficha["Responsable"] = m.group(1).strip()
+            if lin_lower == "responsable":
+                if i + 1 < len(lineas): ficha["Responsable"] = lineas[i+1]
+            
+            elif lin_lower == "sitio":
+                if i + 1 < len(lineas): ficha["Sitio"] = lineas[i+1]
+            
+            elif lin_lower == "hallazgo previsto":
+                pass # Se captura con Regex abajo por seguridad
+            
+            elif lin_lower == "cuadrante":
+                if i + 1 < len(lineas): ficha["Cuadrante"] = lineas[i+1]
+            
+            elif lin_lower in ["dimensión", "dimension"]:
+                if i + 1 < len(lineas): ficha["Dimensión"] = lineas[i+1]
+            
+            elif lin_lower == "fecha":
+                if i + 1 < len(lineas): ficha["Fecha"] = lineas[i+1]
+            
+            elif lin_lower == "material":
+                if i + 1 < len(lineas):
+                    # El famoso salto de columna si viene la palabra superficie
+                    if lineas[i+1].lower().replace(":", "").strip() == "superficie":
+                        if i + 2 < len(lineas): ficha["Material"] = lineas[i+2]
+                    else:
+                        ficha["Material"] = lineas[i+1]
+            
+            elif lin_lower == "superficie":
+                if i + 1 < len(lineas):
+                    # El salto inverso
+                    if i - 1 >= 0 and lineas[i-1].lower().replace(":", "").strip() == "material":
+                        if i + 2 < len(lineas): ficha["Superficie"] = lineas[i+2]
+                    else:
+                        ficha["Superficie"] = lineas[i+1]
+            
+            elif lin_lower.startswith("utm norte"):
+                val = linea[len("UTM Norte"):].strip()
+                val = re.sub(r'^[:\-\s]+', '', val)
+                if val:
+                    ficha["UTM Norte"] = val
+                elif i + 1 < len(lineas):
+                    ficha["UTM Norte"] = lineas[i+1]
+                    
+            elif lin_lower.startswith("utm este"):
+                val = linea[len("UTM Este"):].strip()
+                val = re.sub(r'^[:\-\s]+', '', val)
+                if val:
+                    ficha["UTM Este"] = val
+                elif i + 1 < len(lineas):
+                    ficha["UTM Este"] = lineas[i+1]
 
-        m = re.search(r"([^\n]+)\s*\n+Hallazgo Previsto", texto)
-        if m: 
-            ficha["Hallazgo Previsto"] = m.group(1).strip()
-        else:
-            m = re.search(r"(HLU_HP_\d+|HP_\d+)", texto)
-            if m: ficha["Hallazgo Previsto"] = m.group(1)
+        # FASE DE LIMPIEZA
+        etiquetas_conocidas = ["sitio", "responsable", "cuadrante", "dimensión", "dimension", "fecha", "material", "superficie", "coordenadas", "identificación", "procedencia y material cultural"]
+        for key in list(ficha.keys()):
+            val_limpio = str(ficha[key]).lower().strip()
+            if val_limpio in etiquetas_conocidas or val_limpio == key.lower():
+                ficha[key] = ""
 
-        m = re.search(r"Dimensi[oó]n\s*\n+([^\n]+)", texto, re.IGNORECASE)
-        if m: ficha["Dimensión"] = m.group(1).strip()
-
-        m = re.search(r"Fecha\s*\n+([^\n]+)", texto)
-        if m: 
-            ficha["Fecha"] = m.group(1).strip()
-        if not ficha["Fecha"] or not re.search(r"\d", ficha["Fecha"]):
-            m = re.search(r"(\d{2}/\d{2}/\d{4})", texto)
+        # RESPALDOS DE SEGURIDAD (REGEX)
+        if not ficha["Fecha"]:
+            m = re.search(r"(\d{2}/\d{2}/\d{4})", texto_completo)
             if m: ficha["Fecha"] = m.group(1)
 
-        m = re.search(r"UTM Norte\s*(?:\n\s*)?(\d+)", texto)
-        if m: ficha["UTM Norte"] = m.group(1).strip()
+        if not ficha["Hallazgo Previsto"] or len(ficha["Hallazgo Previsto"]) < 4:
+            m = re.search(r"(HLU_HP_\d+|HP_\d+)", texto_completo)
+            if m: ficha["Hallazgo Previsto"] = m.group(1)
 
-        m = re.search(r"UTM Este\s*(?:\n\s*)?(\d+)", texto)
-        if m: ficha["UTM Este"] = m.group(1).strip()
-
-        m = re.search(r"Material\s*\n+([^\n]+)", texto)
-        if m: ficha["Material"] = m.group(1).strip()
-
-        m = re.search(r"Superficie\s*\n+([^\n]+)", texto)
-        if m: ficha["Superficie"] = m.group(1).strip()
-
-        etiquetas_conocidas = [
-            "Sitio", "Cuadrante", "Responsable", "Hallazgo Previsto", 
-            "Dimensión", "Dimension", "Fecha", "UTM Norte", "UTM Este", 
-            "Material", "Superficie", "Altura", "Descripción", "Cronología", 
-            "COORDENADAS", "IDENTIFICACIÓN", "PROCEDENCIA Y MATERIAL CULTURAL"
-        ]
-        
-        for k, v in ficha.items():
-            for et in etiquetas_conocidas:
-                if v.lower() == et.lower():
-                    ficha[k] = ""
-                    break
-
+        # Solo guardar si hay datos clave
         if ficha["Sitio"] or ficha["Responsable"]:
             fichas.append(ficha)
 
     return fichas
 
+# --- La Interfaz Visual de este módulo ---
 def ejecutar_interfaz():
-    st.title("Generador Base de Datos y GIS (Recolección Superficial)")
-    st.markdown("Extrae datos mediante patrones lógicos (Regex) y convierte coordenadas UTM para QGIS y Google Earth.")
+    st.title("Generador Base de Datos y GIS (Módulo Actualizado)")
+    st.markdown("Extrae datos mediante patrones lógicos secuenciales y convierte coordenadas UTM para QGIS y Google Earth.")
     
     archivos = st.file_uploader("Subir Fichas PDF (.pdf)", accept_multiple_files=True, key="pdf_recoleccion_up_nuevo")
     if archivos and st.button("Procesar Fichas y Crear Mapas"):

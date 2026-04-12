@@ -5,6 +5,7 @@ from docx.oxml.ns import qn
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.section import WD_ORIENT
+import modulo_gis  # Importamos el archivo nuevo que acabamos de crear
 import io
 import pandas as pd
 import zipfile

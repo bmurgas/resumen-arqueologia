@@ -388,7 +388,7 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
                 if i + 1 < len(lineas): ficha["Sitio"] = lineas[i+1]
             
             elif lin_lower == "hallazgo previsto":
-                pass # Se ignora aquí para que lo capture el sistema de seguridad (Regex) más abajo
+                pass 
             
             elif lin_lower == "cuadrante":
                 if i + 1 < len(lineas): ficha["Cuadrante"] = lineas[i+1]
@@ -401,7 +401,6 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
             
             elif lin_lower == "material":
                 if i + 1 < len(lineas):
-                    # Salto de columna
                     if lineas[i+1].lower().replace(":", "").strip() == "superficie":
                         if i + 2 < len(lineas): ficha["Material"] = lineas[i+2]
                     else:
@@ -409,7 +408,6 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
             
             elif lin_lower == "superficie":
                 if i + 1 < len(lineas):
-                    # Salto de columna inverso
                     if i - 1 >= 0 and lineas[i-1].lower().replace(":", "").strip() == "material":
                         if i + 2 < len(lineas): ficha["Superficie"] = lineas[i+2]
                     else:
@@ -431,14 +429,12 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
                 elif i + 1 < len(lineas):
                     ficha["UTM Este"] = lineas[i+1]
 
-        # FASE DE LIMPIEZA
         etiquetas_conocidas = ["sitio", "responsable", "cuadrante", "dimensión", "dimension", "fecha", "material", "superficie", "coordenadas", "identificación", "procedencia y material cultural"]
         for key in list(ficha.keys()):
             val_limpio = str(ficha[key]).lower().strip()
             if val_limpio in etiquetas_conocidas or val_limpio == key.lower():
                 ficha[key] = ""
 
-        # RESPALDOS DE SEGURIDAD
         if not ficha["Fecha"]:
             m = re.search(r"(\d{2}/\d{2}/\d{4})", texto_completo)
             if m: ficha["Fecha"] = m.group(1)
@@ -675,55 +671,92 @@ def obtener_puntos_geograficos_con_foto(archivos):
     return puntos_acumulados
 
 # ==========================================
-# 6. LÓGICA NUEVA: MODIFICAR PDF (AGREGAR TEXTO)
+# 6. LÓGICA NUEVA: MODIFICAR PDF (CONTINUAR PÁRRAFO)
 # ==========================================
 
 def modificar_pdf_agregar_texto(pdf_bytes, texto_a_agregar):
     """
-    Busca la sección 'Descripción de la Actividad' y agrega el texto especificado al final de ese bloque.
+    Busca la sección 'Descripción de la Actividad' y continúa escribiendo 
+    el texto exactamente donde termina el último párrafo, respetando la caja.
     """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         
         for pagina in doc:
-            bloques = pagina.get_text("blocks")
-            bloques.sort(key=lambda b: b[1])  # Ordenar por coordenada Y (de arriba hacia abajo)
+            # Obtenemos el diccionario detallado del texto con información de fuentes y líneas
+            dict_data = pagina.get_text("dict")
+            bloques = dict_data.get("blocks", [])
             
-            y_insert = None
-            x_insert = 50  # Margen izquierdo predeterminado
+            # Ordenamos los bloques de arriba hacia abajo
+            bloques.sort(key=lambda b: b.get("bbox", [0, 0, 0, 0])[1])
             
-            # Buscar el bloque de la "Descripción de la Actividad"
+            target_block = None
+            
+            # 1. Buscamos el bloque de texto que corresponde al párrafo de descripción
             for i, b in enumerate(bloques):
-                texto_bloque = b[4].strip()
-                if "Descripción de la Actividad" in texto_bloque or "V. DESCRIPCIONES" in texto_bloque:
-                    # Si el bloque tiene mucho texto, asumimos que es el párrafo completo
-                    if len(texto_bloque) > 60:
-                        y_insert = b[3] + 5  # y1 del bloque + pequeño margen
-                        x_insert = b[0]      # Alinear con el margen izquierdo de este texto
-                        break
-                    else:
-                        # Si es solo el título, tomamos el bloque de texto que le sigue (el párrafo)
-                        if i + 1 < len(bloques):
-                            y_insert = bloques[i+1][3] + 5
-                            x_insert = bloques[i+1][0]
-                        break
+                if b.get("type") == 0:  # Tipo 0 es texto
+                    texto_bloque = "".join([s["text"] for l in b.get("lines", []) for s in l.get("spans", [])]).strip()
+                    
+                    if "Descripción de la Actividad" in texto_bloque or "V. DESCRIPCIONES" in texto_bloque:
+                        if len(texto_bloque) > 60:
+                            target_block = b
+                            break
+                        else:
+                            # Si este bloque es solo el título, el párrafo es el bloque que sigue
+                            for j in range(i+1, len(bloques)):
+                                if bloques[j].get("type") == 0:
+                                    target_block = bloques[j]
+                                    break
+                            break
             
-            if y_insert:
-                # Definir la "caja" donde se insertará el nuevo texto
-                # Calculamos el ancho de la página para no salirnos de los márgenes
-                ancho_pagina = pagina.rect.width
-                rect_insert = fitz.Rect(x_insert, y_insert, ancho_pagina - 50, y_insert + 50)
+            if target_block:
+                # 2. Tomamos la ÚLTIMA LÍNEA de ese párrafo para saber dónde continuar
+                lines = target_block.get("lines", [])
+                if not lines: continue
                 
-                # Insertar el texto con fuente Helvetica, tamaño 10, color negro (0,0,0)
-                pagina.insert_textbox(
-                    rect_insert, 
-                    texto_a_agregar, 
-                    fontsize=10, 
-                    fontname="helv", 
-                    color=(0, 0, 0),
-                    align=0  # Alinear a la izquierda
-                )
-                break  # Solo agregamos en la primera aparición
+                last_line = lines[-1]
+                spans = last_line.get("spans", [])
+                if not spans: continue
+                
+                last_span = spans[-1]
+                
+                # Rescatamos la fuente y tamaño original (o forzamos un estándar)
+                font_size = last_span.get("size", 9)
+                if font_size < 5 or font_size > 14: font_size = 9 # Protección anti-errores
+                
+                # 3. Coordenadas de inicio: Justo después del último carácter
+                x_curr = last_span["bbox"][2] + 4 
+                baseline_y = last_span["origin"][1] # La línea base exacta donde se apoyan las letras
+                line_height = font_size * 1.2
+                
+                # Definir límites de la "caja" para que no se salga
+                margin_left = lines[0]["bbox"][0] # Empezar al mismo margen izquierdo del párrafo original
+                margin_right = pagina.rect.width - 50 # Un margen de seguridad antes del borde derecho de la hoja
+                
+                # 4. Insertar palabra por palabra haciendo salto de línea si choca con el margen
+                words = texto_a_agregar.split(" ")
+                for word in words:
+                    # Calculamos el ancho de esta palabra
+                    word_len = fitz.get_text_length(word + " ", fontname="helv", fontsize=font_size)
+                    
+                    # Si nos pasamos de la caja, bajamos una línea
+                    if x_curr + word_len > margin_right:
+                        x_curr = margin_left
+                        baseline_y += line_height
+                        
+                    # Escribimos la palabra
+                    pagina.insert_text(
+                        fitz.Point(x_curr, baseline_y), 
+                        word + " ", 
+                        fontname="helv", 
+                        fontsize=font_size, 
+                        color=(0,0,0)
+                    )
+                    
+                    # Avanzamos el cursor para la siguiente palabra
+                    x_curr += word_len
+                    
+                break  # Solo procesamos la primera aparición válida
                 
         buffer = io.BytesIO()
         doc.save(buffer)
@@ -746,7 +779,7 @@ opcion = st.sidebar.radio("Herramientas:", [
     "Generador Fichas (Desde Word)",
     "Generador KMZ (Georreferenciación)",
     "Visor de Mapa Interactivo",
-    "Modificar PDF (Agregar Texto)" # <--- NUEVO MÓDULO AGREGADO
+    "Modificar PDF (Agregar Texto)"
 ])
 
 # 1. Generador Word (MAP - Desde Word)
@@ -1049,9 +1082,8 @@ elif opcion == "Visor de Mapa Interactivo":
 # 6. Modificar PDF (Agregar Texto)
 elif opcion == "Modificar PDF (Agregar Texto)":
     st.title("Modificar PDF: Agregar Ley 17.288")
-    st.markdown("Agrega automáticamente un texto estándar al final del párrafo de 'Descripción de la Actividad'.")
+    st.markdown("Agrega automáticamente un texto estándar a continuación del párrafo de 'Descripción de la Actividad'.")
     
-    # Caja de texto editable para el usuario
     texto_por_defecto = "Durante la jornada no se identifican hallazgos arqueológicos afectos a la ley 17.288."
     texto_usuario = st.text_input("Texto a insertar:", value=texto_por_defecto)
     

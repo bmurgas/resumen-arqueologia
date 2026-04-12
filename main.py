@@ -671,38 +671,28 @@ def obtener_puntos_geograficos_con_foto(archivos):
     return puntos_acumulados
 
 # ==========================================
-# 6. LÓGICA NUEVA: MODIFICAR PDF (CONTINUAR PÁRRAFO)
+# 6. LÓGICA NUEVA: MODIFICAR PDF (EL PARCHE VISUAL)
 # ==========================================
 
 def modificar_pdf_agregar_texto(pdf_bytes, texto_a_agregar):
-    """
-    Busca la sección 'Descripción de la Actividad' y continúa escribiendo 
-    el texto exactamente donde termina el último párrafo, respetando la caja.
-    """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         
         for pagina in doc:
-            # Obtenemos el diccionario detallado del texto con información de fuentes y líneas
             dict_data = pagina.get_text("dict")
             bloques = dict_data.get("blocks", [])
-            
-            # Ordenamos los bloques de arriba hacia abajo
             bloques.sort(key=lambda b: b.get("bbox", [0, 0, 0, 0])[1])
             
             target_block = None
             
-            # 1. Buscamos el bloque de texto que corresponde al párrafo de descripción
             for i, b in enumerate(bloques):
-                if b.get("type") == 0:  # Tipo 0 es texto
+                if b.get("type") == 0:
                     texto_bloque = "".join([s["text"] for l in b.get("lines", []) for s in l.get("spans", [])]).strip()
-                    
                     if "Descripción de la Actividad" in texto_bloque or "V. DESCRIPCIONES" in texto_bloque:
                         if len(texto_bloque) > 60:
                             target_block = b
                             break
                         else:
-                            # Si este bloque es solo el título, el párrafo es el bloque que sigue
                             for j in range(i+1, len(bloques)):
                                 if bloques[j].get("type") == 0:
                                     target_block = bloques[j]
@@ -710,41 +700,46 @@ def modificar_pdf_agregar_texto(pdf_bytes, texto_a_agregar):
                             break
             
             if target_block:
-                # 2. Tomamos la ÚLTIMA LÍNEA de ese párrafo para saber dónde continuar
                 lines = target_block.get("lines", [])
                 if not lines: continue
-                
                 last_line = lines[-1]
                 spans = last_line.get("spans", [])
                 if not spans: continue
-                
                 last_span = spans[-1]
                 
-                # Rescatamos la fuente y tamaño original (o forzamos un estándar)
                 font_size = last_span.get("size", 9)
-                if font_size < 5 or font_size > 14: font_size = 9 # Protección anti-errores
+                if font_size < 5 or font_size > 14: font_size = 9
                 
-                # 3. Coordenadas de inicio: Justo después del último carácter
+                # Inicia a escribir justo después de la última palabra original
                 x_curr = last_span["bbox"][2] + 4 
-                baseline_y = last_span["origin"][1] # La línea base exacta donde se apoyan las letras
+                baseline_y = last_span["origin"][1]
                 line_height = font_size * 1.2
                 
-                # Definir límites de la "caja" para que no se salga
-                margin_left = lines[0]["bbox"][0] # Empezar al mismo margen izquierdo del párrafo original
-                margin_right = pagina.rect.width - 50 # Un margen de seguridad antes del borde derecho de la hoja
+                # Definir los bordes de la caja
+                margin_left = lines[0]["bbox"][0]
+                margin_right = max([l["bbox"][2] for l in lines])
+                if margin_right < margin_left + 100: 
+                    margin_right = pagina.rect.width - 50 # Seguridad
                 
-                # 4. Insertar palabra por palabra haciendo salto de línea si choca con el margen
+                # --- EL TRUCO VISUAL (PARCHE) ---
+                # 1. Dibujar rectángulo blanco para borrar la línea inferior
+                y_borrar_inicio = last_span["bbox"][3] - 2
+                y_borrar_fin = y_borrar_inicio + 40 # Borra 40 pixeles hacia abajo
+                rect_blanco = fitz.Rect(margin_left - 10, y_borrar_inicio, margin_right + 10, y_borrar_fin)
+                pagina.draw_rect(rect_blanco, color=(1, 1, 1), fill=(1, 1, 1))
+
+                # 2. Insertar el texto línea a línea
                 words = texto_a_agregar.split(" ")
+                max_y_alcanzado = baseline_y
+                
                 for word in words:
-                    # Calculamos el ancho de esta palabra
                     word_len = fitz.get_text_length(word + " ", fontname="helv", fontsize=font_size)
-                    
-                    # Si nos pasamos de la caja, bajamos una línea
+                    # Si choca con el borde derecho, salta de línea
                     if x_curr + word_len > margin_right:
                         x_curr = margin_left
                         baseline_y += line_height
+                        max_y_alcanzado = baseline_y
                         
-                    # Escribimos la palabra
                     pagina.insert_text(
                         fitz.Point(x_curr, baseline_y), 
                         word + " ", 
@@ -752,11 +747,19 @@ def modificar_pdf_agregar_texto(pdf_bytes, texto_a_agregar):
                         fontsize=font_size, 
                         color=(0,0,0)
                     )
-                    
-                    # Avanzamos el cursor para la siguiente palabra
                     x_curr += word_len
-                    
-                break  # Solo procesamos la primera aparición válida
+                
+                # 3. Dibujar de nuevo las líneas para "cerrar" el cuadro más abajo
+                y_linea_final = max_y_alcanzado + (font_size * 0.7)
+                
+                # Línea base
+                pagina.draw_line(fitz.Point(margin_left - 5, y_linea_final), fitz.Point(margin_right + 5, y_linea_final), color=(0,0,0), width=0.5)
+                # Línea lateral izquierda
+                pagina.draw_line(fitz.Point(margin_left - 5, y_borrar_inicio), fitz.Point(margin_left - 5, y_linea_final), color=(0,0,0), width=0.5)
+                # Línea lateral derecha
+                pagina.draw_line(fitz.Point(margin_right + 5, y_borrar_inicio), fitz.Point(margin_right + 5, y_linea_final), color=(0,0,0), width=0.5)
+
+                break 
                 
         buffer = io.BytesIO()
         doc.save(buffer)

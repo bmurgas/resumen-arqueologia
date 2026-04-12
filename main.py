@@ -10,7 +10,6 @@ import pandas as pd
 import zipfile
 import re
 import base64 
-import json # <--- NUEVA IMPORTACIÓN PARA QGIS
 from pyproj import Transformer
 from datetime import datetime
 import locale
@@ -61,7 +60,7 @@ def obtener_texto_celda_abajo(tabla, fila_idx, col_idx):
     return ""
 
 def limpiar_coordenada(texto):
-    texto_limpio = str(texto).replace(".", "").replace(" ", "").strip()
+    texto_limpio = texto.replace(".", "").replace(" ", "").strip()
     texto_limpio = texto_limpio.replace(",", ".")
     try:
         return float(texto_limpio)
@@ -223,10 +222,16 @@ def generar_word_con_formato(datos):
     return buffer
 
 # ==========================================
-# 2.1 LÓGICA NUEVA: GENERADOR WORD MAP (DESDE PDF)
+# 2.1 LÓGICA NUEVA: GENERADOR WORD MAP (DESDE PDF) - V8 FINAL (Con Hallazgos)
 # ==========================================
 
 def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
+    """
+    Extrae Fecha, Actividad y Fotos de reportes en PDF usando PyMuPDF (fitz).
+    - Captura actividad entre Sección IV y VI (Estado Persistente).
+    - Detecta "Presencia de Hallazgos" y agrega texto resumen "Se identificaron..." o "No se identificaron...".
+    - Filtra fotos (Logo Header y Fotos vacías).
+    """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     except Exception as e:
@@ -240,43 +245,55 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
         "fotos": []
     }
     
+    # --- VARIABLES DE ESTADO Y CONFIGURACIÓN ---
     capturando_descripcion = False
     
+    # Textos basura a limpiar de la descripción
     blacklist_clean = [
-        "V. DESCRripciones", "V. DESCRIPCIONES", "Descripción de la Actividad", 
+        "V. DESCRIPCIONES", "Descripción de la Actividad", 
         "Huso", "18 G", "19 H", "Datum", "WGS84",
         "Coordenadas", "Vértice", "Este", "Norte", "Altitud"
     ]
 
     for pagina_idx, pagina in enumerate(doc):
+        # 1. ORDENAR BLOQUES VISUALMENTE
         bloques = pagina.get_text("blocks")
         bloques.sort(key=lambda b: (b[1], b[0])) 
         
         texto_plano_pagina = pagina.get_text("text")
 
+        # DETECTAR NUEVA FICHA (Reset)
         if "I. IDENTIFICACIÓN" in texto_plano_pagina or "Ficha de Monitoreo Arqueológico" in texto_plano_pagina:
             if ficha_actual["fecha"] or ficha_actual["texto_central"] or ficha_actual["fotos"]:
                 fichas.append(ficha_actual)
             ficha_actual = { "fecha": None, "texto_central": "", "fotos": [] }
             capturando_descripcion = False
 
+        # 2. EXTRAER FECHA
         if not ficha_actual["fecha"]:
             match_fecha = re.search(r"(\d{2}/\d{2}/\d{4})", texto_plano_pagina)
             if match_fecha:
                 ficha_actual["fecha"] = match_fecha.group(1)
 
+        # 3. EXTRAER ACTIVIDAD (Lógica de Estado Persistente)
         for i, b in enumerate(bloques):
             txt = b[4].strip()
             
-            if "V. DESCRripciones" in txt or "Descripción de la Actividad" in txt:
+            # --- LÓGICA DE CAPTURA DE TEXTO (V a VI) ---
+            # A. Inicio
+            if "V. DESCRIPCIONES" in txt or "Descripción de la Actividad" in txt:
                 capturando_descripcion = True
                 continue 
 
+            # B. Fin
             if "VI. CARACTERÍSTICAS" in txt or "CARACTERÍSTICAS DE LA CAPA" in txt:
                 capturando_descripcion = False
             
+            # C. Captura
             if capturando_descripcion:
-                if len(txt) < 3: continue 
+                if len(txt) < 3: continue # Ignorar basura pequeña
+                
+                # Chequeo anti-título
                 es_titulo = False
                 for bad in blacklist_clean:
                     if bad in txt:
@@ -289,14 +306,18 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
                     else:
                          ficha_actual["texto_central"] = txt
 
+            # --- LÓGICA NUEVA: DETECCIÓN DE HALLAZGOS (VII) ---
+            # Buscamos la etiqueta "Presencia de Hallazgos"
             if "Presencia de Hallazgos" in txt:
                 texto_resultado = ""
                 
+                # Opción 1: El Sí/No está en el mismo bloque (ej. "Presencia de Hallazgos No")
                 if re.search(r"Presencia de Hallazgos\s*No", txt, re.IGNORECASE):
                     texto_resultado = "No se identificaron hallazgos"
                 elif re.search(r"Presencia de Hallazgos\s*(Sí|Si)", txt, re.IGNORECASE):
                     texto_resultado = "Se identificaron hallazgos"
                 
+                # Opción 2: El Sí/No está en el bloque siguiente (celda visualmente contigua)
                 elif i + 1 < len(bloques):
                     txt_next = bloques[i+1][4].strip()
                     if "No" == txt_next or "No" in txt_next[:3]:
@@ -304,10 +325,12 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
                     elif "Sí" in txt_next or "Si" in txt_next or "Sí" == txt_next:
                         texto_resultado = "Se identificaron hallazgos"
                 
+                # Agregar el resultado al texto central (evitando duplicados en la misma ficha)
                 if texto_resultado:
                     if texto_resultado not in ficha_actual["texto_central"]:
                         ficha_actual["texto_central"] += "\n\n" + texto_resultado
 
+        # 4. EXTRAER FOTOS
         sin_fotos = "No se registraron fotografías" in texto_plano_pagina or \
                     "No se registraron fotografias" in texto_plano_pagina or \
                     "No se registraron fotografias" in texto_plano_pagina.lower()
@@ -327,10 +350,11 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
                 for img in lista_imagenes:
                     bbox = pagina.get_image_bbox(img)
                     
-                    if bbox.y0 < 150: continue 
-                    if tiene_titulo_VIII and bbox.y0 < y_titulo_VIII: continue 
+                    # FILTROS
+                    if bbox.y0 < 150: continue # Logo Header
+                    if tiene_titulo_VIII and bbox.y0 < y_titulo_VIII: continue # Antes del título
                     base_image = doc.extract_image(img[0])
-                    if base_image["width"] < 150 or base_image["height"] < 150: continue 
+                    if base_image["width"] < 150 or base_image["height"] < 150: continue # Iconos
                     
                     image_bytes = base_image["image"]
                     leyenda_encontrada = ""
@@ -353,105 +377,6 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
     return fichas
 
 # ==========================================
-# 2.2 LÓGICA NUEVA: GENERADOR EXCEL (RECOLECCIÓN SUPERFICIAL)
-# ==========================================
-
-def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
-    try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    except Exception as e:
-        st.error(f"Error abriendo PDF {nombre_archivo}: {e}")
-        return []
-
-    fichas = []
-
-    for pagina in doc:
-        texto_completo = pagina.get_text("text")
-        lineas = [l.strip() for l in texto_completo.split('\n') if l.strip()]
-        
-        if len(lineas) < 10:
-            continue
-
-        ficha = {
-            "Responsable": "", "Sitio": "", "Hallazgo Previsto": "",
-            "Cuadrante": "", "Dimensión": "", "Fecha": "",
-            "UTM Norte": "", "UTM Este": "", "Material": "", "Superficie": ""
-        }
-
-        for i, linea in enumerate(lineas):
-            lin_lower = linea.lower().replace(":", "").strip()
-
-            if lin_lower == "responsable":
-                if i + 1 < len(lineas): ficha["Responsable"] = lineas[i+1]
-            
-            elif lin_lower == "sitio":
-                if i + 1 < len(lineas): ficha["Sitio"] = lineas[i+1]
-            
-            elif lin_lower == "hallazgo previsto":
-                pass # Se ignora, se captura abajo mediante Expresión Regular para 100% de precisión
-            
-            elif lin_lower == "cuadrante":
-                if i + 1 < len(lineas): ficha["Cuadrante"] = lineas[i+1]
-            
-            elif lin_lower in ["dimensión", "dimension"]:
-                if i + 1 < len(lineas): ficha["Dimensión"] = lineas[i+1]
-            
-            elif lin_lower == "fecha":
-                if i + 1 < len(lineas): ficha["Fecha"] = lineas[i+1]
-            
-            elif lin_lower == "material":
-                if i + 1 < len(lineas):
-                    if lineas[i+1].lower().replace(":", "").strip() == "superficie":
-                        if i + 2 < len(lineas): ficha["Material"] = lineas[i+2]
-                    else:
-                        ficha["Material"] = lineas[i+1]
-            
-            elif lin_lower == "superficie":
-                if i + 1 < len(lineas):
-                    if i - 1 >= 0 and lineas[i-1].lower().replace(":", "").strip() == "material":
-                        if i + 2 < len(lineas): ficha["Superficie"] = lineas[i+2]
-                    else:
-                        ficha["Superficie"] = lineas[i+1]
-            
-            elif lin_lower.startswith("utm norte"):
-                val = linea[len("UTM Norte"):].strip()
-                val = re.sub(r'^[:\-\s]+', '', val)
-                if val:
-                    ficha["UTM Norte"] = val
-                elif i + 1 < len(lineas):
-                    ficha["UTM Norte"] = lineas[i+1]
-                    
-            elif lin_lower.startswith("utm este"):
-                val = linea[len("UTM Este"):].strip()
-                val = re.sub(r'^[:\-\s]+', '', val)
-                if val:
-                    ficha["UTM Este"] = val
-                elif i + 1 < len(lineas):
-                    ficha["UTM Este"] = lineas[i+1]
-
-        # FASE DE LIMPIEZA
-        etiquetas_conocidas = ["sitio", "responsable", "cuadrante", "dimensión", "dimension", "fecha", "material", "superficie", "coordenadas", "identificación", "procedencia y material cultural"]
-        for key in list(ficha.keys()):
-            val_limpio = str(ficha[key]).lower().strip()
-            if val_limpio in etiquetas_conocidas or val_limpio == key.lower():
-                ficha[key] = ""
-
-        # RESPALDOS DE SEGURIDAD
-        if not ficha["Fecha"]:
-            m = re.search(r"(\d{2}/\d{2}/\d{4})", texto_completo)
-            if m: ficha["Fecha"] = m.group(1)
-
-        # Buscar específicamente el ID del Hallazgo Previsto
-        if not ficha["Hallazgo Previsto"] or len(ficha["Hallazgo Previsto"]) < 4:
-            m = re.search(r"(HLU_HP_\d+|HP_\d+)", texto_completo)
-            if m: ficha["Hallazgo Previsto"] = m.group(1)
-
-        if ficha["Sitio"] or ficha["Responsable"]:
-            fichas.append(ficha)
-
-    return fichas
-
-# ==========================================
 # 3. LÓGICA: GENERADOR EXCEL (DESDE WORD)
 # ==========================================
 
@@ -463,27 +388,38 @@ def procesar_word_a_excel(archivo_bytes, nombre_archivo):
         return []
 
     registros = []
+    
     for tabla in doc.tables:
-        dato = {"Fecha": "", "Descripción de la actividad": "", "Descripción estratigráfica": ""}
+        dato = {
+            "Fecha": "",
+            "Descripción de la actividad": "",
+            "Descripción estratigráfica": ""
+        }
         encontrado = False 
+        
         for fila in tabla.rows:
             for i, celda in enumerate(fila.cells):
                 texto_celda = celda.text.strip()
+                
                 if "Fecha" in texto_celda and len(texto_celda) < 20:
                     if i + 1 < len(fila.cells):
                         dato["Fecha"] = fila.cells[i+1].text.strip()
                         encontrado = True
+                
                 if "Descripción de la actividad" in texto_celda:
                     if i + 1 < len(fila.cells):
                         dato["Descripción de la actividad"] = fila.cells[i+1].text.strip()
                         encontrado = True
+
                 if "Descripción estratigráfica" in texto_celda:
                     if i + 1 < len(fila.cells):
                         dato["Descripción estratigráfica"] = fila.cells[i+1].text.strip()
                         encontrado = True
+
         if encontrado:
             if dato["Fecha"] or dato["Descripción de la actividad"] or dato["Descripción estratigráfica"]:
                 registros.append(dato)
+                
     return registros
 
 # ==========================================
@@ -498,6 +434,7 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
         return []
 
     fichas = []
+    
     for tabla in doc.tables:
         info = {
             "ID Sitio": "", "Coord. Norte": "", "Coord. Este": "", 
@@ -517,23 +454,29 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
                     if val:
                         info["ID Sitio"] = val
                         es_ficha = True
+                
                 if "Fecha" in txt and c_idx + 1 < len(fila.cells):
                     info["Fecha"] = fila.cells[c_idx+1].text.strip()
+                        
                 if "Responsable" in txt and c_idx + 1 < len(fila.cells):
                     info["Responsable"] = fila.cells[c_idx+1].text.strip()
+
                 if "Categoría" in txt and c_idx + 1 < len(fila.cells):
                     info["Categoría"] = fila.cells[c_idx+1].text.strip()
+
                 if "Coord. Central Norte" in txt and c_idx + 1 < len(fila.cells):
                     info["Coord. Norte"] = fila.cells[c_idx+1].text.strip()
                 if "Coord. Central Este" in txt and c_idx + 1 < len(fila.cells):
                     info["Coord. Este"] = fila.cells[c_idx+1].text.strip()
 
+                # Descripción
                 if txt == "Descripción": 
                     if c_idx + 1 < len(fila.cells):
                         vecino = fila.cells[c_idx+1].text.strip()
                         if "CRONOLOGÍA" not in vecino:
                             info["Descripción"] = vecino
                 
+                # Cronología
                 opciones = ["Prehispánico", "Subactual", "Incierto", "Histórico"]
                 for op in opciones:
                     if op in txt:
@@ -549,6 +492,7 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
                         if val and len(val) > 1 and "X" not in val.upper():
                             crono_extra.append(f"Periodo específico: {val}")
 
+                # Foto
                 if "Fotografía detalle" in txt:
                     if r_idx > 0:
                         celda_arriba = tabla.rows[r_idx - 1].cells[c_idx]
@@ -567,6 +511,7 @@ def procesar_maestro_desde_word(archivo_bytes, nombre_archivo):
 
 def crear_doc_tabla_horizontal(datos):
     doc = Document()
+    
     section = doc.sections[0]
     new_width, new_height = section.page_height, section.page_width
     section.orientation = WD_ORIENT.LANDSCAPE
@@ -637,40 +582,55 @@ def crear_kml_texto(puntos):
     return kml_header + kml_body + kml_footer
 
 def obtener_puntos_geograficos_con_foto(archivos):
+    """
+    Extrae coords y FOTOS para el mapa interactivo.
+    """
     try:
         transformer = Transformer.from_crs("epsg:32718", "epsg:4326", always_xy=True)
     except:
         return None
 
     puntos_acumulados = []
+    
     for a in archivos:
         try:
             doc = Document(io.BytesIO(a.read()))
             for tabla in doc.tables:
                 id_sitio, norte, este, desc = "", "", "", ""
                 foto_bytes = None
+                
                 for r_idx, fila in enumerate(tabla.rows):
                     for idx, celda in enumerate(fila.cells):
                         txt = celda.text.strip()
+                        
+                        # Datos
                         if "ID Sitio" in txt and idx+1 < len(fila.cells): id_sitio = fila.cells[idx+1].text.strip()
                         if "Coord. Central Norte" in txt and idx+1 < len(fila.cells): norte = fila.cells[idx+1].text.strip()
                         if "Coord. Central Este" in txt and idx+1 < len(fila.cells): este = fila.cells[idx+1].text.strip()
                         if "Categoría" in txt and idx+1 < len(fila.cells): desc = fila.cells[idx+1].text.strip()
+                        
+                        # Foto (para el mapa)
                         if "Fotografía detalle" in txt and r_idx > 0:
                             celda_arriba = tabla.rows[r_idx - 1].cells[idx]
                             imgs = obtener_imagenes_con_id(celda_arriba._element, doc)
                             if imgs:
                                 foto_bytes = imgs[0][1]
+                
                 if id_sitio and norte and este:
                     n = limpiar_coordenada(norte)
                     e = limpiar_coordenada(este)
                     if n and e:
                         lon, lat = transformer.transform(e, n)
                         puntos_acumulados.append({
-                            "nombre": id_sitio, "desc": desc, "lat": lat, "lon": lon, "foto": foto_bytes
+                            "nombre": id_sitio, 
+                            "desc": desc, 
+                            "lat": lat, 
+                            "lon": lon,
+                            "foto": foto_bytes
                         })
         except:
             continue
+            
     return puntos_acumulados
 
 # ==========================================
@@ -682,7 +642,6 @@ opcion = st.sidebar.radio("Herramientas:", [
     "Generador Word (MAP)", 
     "Generador Word MAP (Desde PDF)", 
     "Generador Excel (Desde Word)",
-    "Generador Excel (Recolección Superficial)",
     "Generador Fichas (Desde Word)",
     "Generador KMZ (Georreferenciación)",
     "Visor de Mapa Interactivo"
@@ -708,22 +667,30 @@ if opcion == "Generador Word (MAP)":
             st.download_button("Descargar Word", doc_out, "Resumen_MAP.docx")
         else: st.error("No se encontraron datos.")
 
-# 1.1 Generador Word MAP (Desde PDF)
+# 1.1 Generador Word MAP (Desde PDF) - V8
 elif opcion == "Generador Word MAP (Desde PDF)":
     st.title("Generador Word MAP (Desde PDF)")
     st.markdown("Crea la tabla resumen mensual extrayendo datos de reportes en PDF.")
     st.warning("Requiere librería 'pymupdf' instalada.")
+    
     archivos = st.file_uploader("Subir Reportes PDF (.pdf)", accept_multiple_files=True, key="pdf_up")
+    
     if archivos and st.button("Procesar PDFs y Generar Word"):
         todas_fichas = []
         bar = st.progress(0)
+        
         for i, a in enumerate(archivos):
             fichas = procesar_pdf_a_word_map(a.read(), a.name)
             todas_fichas.extend(fichas)
             bar.progress((i+1)/len(archivos))
+            
         if todas_fichas:
+            # Ordenar por fecha si es posible
             todas_fichas.sort(key=lambda x: x['fecha'] if x['fecha'] else "ZZZ")
+            
+            # Reutilizamos la función de formato que ya existe
             doc_out = generar_word_con_formato(todas_fichas)
+            
             st.success(f"✅ Se procesaron {len(todas_fichas)} fichas desde PDF.")
             st.download_button("Descargar Word Resumen", doc_out, "Resumen_MAP_Desde_PDF.docx")
         else:
@@ -750,119 +717,6 @@ elif opcion == "Generador Excel (Desde Word)":
                 df.to_excel(writer, index=False, sheet_name="Resumen")
             st.download_button("⬇️ Descargar Excel", buffer.getvalue(), "Resumen_Word_Excel.xlsx")
         else: st.error("No se encontraron datos.")
-
-# 2.2 Generador Excel (Recolección Superficial) - CON GENERADOR GIS INTEGRADO
-elif opcion == "Generador Excel (Recolección Superficial)":
-    st.title("Generador Base de Datos y GIS (Recolección Superficial)")
-    st.markdown("Extrae datos específicos de las Fichas de Recolección en PDF. Además, convierte las coordenadas UTM y genera archivos listos para QGIS y Google Earth.")
-    
-    archivos = st.file_uploader("Subir Fichas PDF (.pdf)", accept_multiple_files=True, key="pdf_recoleccion_up")
-    if archivos and st.button("Procesar Fichas"):
-        todas_las_fichas = []
-        bar = st.progress(0)
-        for i, a in enumerate(archivos):
-            fichas_extraidas = procesar_pdf_recoleccion_superficial(a.read(), a.name)
-            todas_las_fichas.extend(fichas_extraidas)
-            bar.progress((i+1)/len(archivos))
-            
-        if todas_las_fichas:
-            columnas_ordenadas = [
-                "Responsable", "Sitio", "Hallazgo Previsto", "Cuadrante", 
-                "Dimensión", "Fecha", "UTM Norte", "UTM Este", "Material", "Superficie"
-            ]
-            df = pd.DataFrame(todas_las_fichas)[columnas_ordenadas]
-            st.success(f"✅ Se extrajeron {len(df)} registros correctamente.")
-            st.dataframe(df)
-            
-            # --- 1. PREPARAR EXCEL ---
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False, sheet_name="Hallazgos Previstos")
-            
-            # --- 2. PREPARAR GIS (KMZ Y GEOJSON) ---
-            kmz_buffer = None
-            geojson_str = None
-            try:
-                # Transformador de UTM 18S a Lat/Lon WGS84
-                transformer = Transformer.from_crs("epsg:32718", "epsg:4326", always_xy=True)
-                puntos_kml = []
-                features_geojson = []
-                
-                for f in todas_las_fichas:
-                    n_val = limpiar_coordenada(f.get("UTM Norte", ""))
-                    e_val = limpiar_coordenada(f.get("UTM Este", ""))
-                    
-                    if n_val and e_val:
-                        lon, lat = transformer.transform(e_val, n_val)
-                        nombre = f.get("Hallazgo Previsto", f.get("Sitio", "Sin ID"))
-                        desc = f"Material: {f.get('Material', '')} | Superficie: {f.get('Superficie', '')} | Fecha: {f.get('Fecha', '')}"
-                        
-                        # Guardar para KMZ
-                        puntos_kml.append({"nombre": nombre, "desc": desc, "lat": lat, "lon": lon})
-                        
-                        # Guardar para GeoJSON
-                        features_geojson.append({
-                            "type": "Feature",
-                            "properties": {
-                                "ID_Hallazgo": nombre,
-                                "Sitio": f.get("Sitio", ""),
-                                "Cuadrante": f.get("Cuadrante", ""),
-                                "Material": f.get("Material", ""),
-                                "Superficie": f.get("Superficie", ""),
-                                "Fecha": f.get("Fecha", "")
-                            },
-                            "geometry": {
-                                "type": "Point",
-                                "coordinates": [lon, lat]
-                            }
-                        })
-                        
-                # Construir archivos físicos si hubo coordenadas válidas
-                if puntos_kml:
-                    # KMZ
-                    kml_content = crear_kml_texto(puntos_kml)
-                    kmz_buffer = io.BytesIO()
-                    with zipfile.ZipFile(kmz_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                        zf.writestr("doc.kml", kml_content)
-                    kmz_buffer.seek(0)
-                    
-                    # GeoJSON (Nativo para QGIS)
-                    geojson_data = {
-                        "type": "FeatureCollection",
-                        "features": features_geojson
-                    }
-                    geojson_str = json.dumps(geojson_data)
-            except Exception as e:
-                st.warning("⚠️ No se pudieron procesar los archivos espaciales. Asegúrate de tener la librería 'pyproj' instalada.")
-
-            # --- 3. MOSTRAR BOTONES DE DESCARGA ---
-            st.markdown("### Descargas Disponibles")
-            col1, col2, col3 = st.columns(3)
-            
-            col1.download_button(
-                label="📊 Descargar Excel", 
-                data=buffer.getvalue(), 
-                file_name="Base_Datos_Recoleccion_Superficial.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            
-            if kmz_buffer:
-                col2.download_button(
-                    label="🌍 Descargar KMZ (Google Earth)", 
-                    data=kmz_buffer.getvalue(), 
-                    file_name="Geometrias_Recoleccion.kmz",
-                    mime="application/vnd.google-earth.kmz"
-                )
-            
-            if geojson_str:
-                col3.download_button(
-                    label="🗺️ Descargar GeoJSON (Para QGIS)", 
-                    data=geojson_str, 
-                    file_name="Geometrias_Recoleccion.geojson",
-                    mime="application/geo+json"
-                )
-        else:
-            st.error("No se encontraron datos de recolección válidos en los PDFs subidos.")
 
 # 3. Generador Fichas (Desde Word)
 elif opcion == "Generador Fichas (Desde Word)":

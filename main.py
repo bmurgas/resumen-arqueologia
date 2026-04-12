@@ -671,91 +671,6 @@ def obtener_puntos_geograficos_con_foto(archivos):
     return puntos_acumulados
 
 # ==========================================
-# 6. LÓGICA NUEVA: MODIFICAR PDF (LLENAR EL VACÍO SIN BORRAR NADA)
-# ==========================================
-
-def modificar_pdf_agregar_texto(pdf_bytes, texto_a_agregar):
-    """
-    Busca la sección 'Descripción de la Actividad' y encuentra el espacio 
-    vacío exacto entre el final del párrafo y el siguiente título.
-    Usa ese espacio para inyectar el texto, reduciendo la fuente si es necesario, 
-    sin borrar ni alterar ninguna línea de la tabla original.
-    """
-    try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        
-        for pagina in doc:
-            dict_data = pagina.get_text("dict")
-            bloques = dict_data.get("blocks", [])
-            
-            en_descripcion = False
-            last_line_bbox = None
-            next_section_y0 = None
-            margin_left = 60 # Margen izquierdo predeterminado seguro
-            margin_right = pagina.rect.width - 60
-
-            # 1. Aplastamos todas las líneas del PDF en una sola lista para leer en orden
-            all_lines = []
-            for b in bloques:
-                if b.get("type") == 0:
-                    for l in b.get("lines", []):
-                        text = "".join([s["text"] for s in l.get("spans", [])]).strip()
-                        if text:
-                            all_lines.append({
-                                "text": text,
-                                "bbox": l["bbox"]
-                            })
-
-            # 2. Buscamos dónde termina el texto y dónde empieza el siguiente título
-            for l in all_lines:
-                text = l["text"]
-
-                # Si ya estamos en la descripción y encontramos el título de abajo, guardamos su coordenada superior
-                if "Presencia de Hallazgos" in text or "VI. CARACTERÍSTICAS" in text:
-                    if en_descripcion:
-                        next_section_y0 = l["bbox"][1]
-                        break
-
-                if "Descripción de la Actividad" in text or "V. DESCRIPCIONES" in text:
-                    en_descripcion = True
-                    continue
-
-                if en_descripcion:
-                    last_line_bbox = l["bbox"]
-                    # Calcular dinámicamente el margen izquierdo basándonos en el párrafo original
-                    if l["bbox"][0] > 30 and l["bbox"][0] < 150:
-                        margin_left = l["bbox"][0]
-
-            # 3. Si encontramos el hueco perfecto, insertamos el texto
-            if last_line_bbox and next_section_y0:
-                y_start = last_line_bbox[3] + 2 # Empezar 2 píxeles debajo de la última palabra
-                y_end = next_section_y0 - 2     # Terminar 2 píxeles arriba de la línea de "Presencia de Hallazgos"
-
-                # Verificamos que físicamente haya espacio (un hueco positivo)
-                if y_end > y_start:
-                    rect_escritura = fitz.Rect(margin_left, y_start, margin_right, y_end)
-
-                    # insert_textbox tiene la magia de encoger el texto (fontsize) automáticamente
-                    # para que quepa perfecto en la caja sin salirse ni tapar líneas.
-                    pagina.insert_textbox(
-                        rect_escritura,
-                        texto_a_agregar,
-                        fontsize=9.0,
-                        fontname="helv",
-                        color=(0,0,0),
-                        align=0 # Alinear a la izquierda
-                    )
-                    break 
-                
-        buffer = io.BytesIO()
-        doc.save(buffer)
-        return buffer.getvalue()
-        
-    except Exception as e:
-        st.error(f"Error modificando PDF: {e}")
-        return None
-
-# ==========================================
 #          MENÚ LATERAL
 # ==========================================
 
@@ -767,8 +682,7 @@ opcion = st.sidebar.radio("Herramientas:", [
     "Generador Excel (Recolección Superficial)",
     "Generador Fichas (Desde Word)",
     "Generador KMZ (Georreferenciación)",
-    "Visor de Mapa Interactivo",
-    "Modificar PDF (Agregar Texto)"
+    "Visor de Mapa Interactivo"
 ])
 
 # 1. Generador Word (MAP - Desde Word)
@@ -1067,27 +981,3 @@ elif opcion == "Visor de Mapa Interactivo":
             ).add_to(m)
         
         st_folium(m, width=900, height=600)
-
-# 6. Modificar PDF (Agregar Texto)
-elif opcion == "Modificar PDF (Agregar Texto)":
-    st.title("Modificar PDF: Agregar Ley 17.288")
-    st.markdown("Agrega automáticamente un texto estándar a continuación del párrafo de 'Descripción de la Actividad'.")
-    
-    texto_por_defecto = "Durante la jornada no se identifican hallazgos arqueológicos afectos a la ley 17.288."
-    texto_usuario = st.text_input("Texto a insertar:", value=texto_por_defecto)
-    
-    archivos_pdf = st.file_uploader("Subir PDFs para modificar", accept_multiple_files=True, key="pdf_modify_up")
-    
-    if archivos_pdf and st.button("Procesar y Modificar PDFs"):
-        for pdf_file in archivos_pdf:
-            pdf_modificado_bytes = modificar_pdf_agregar_texto(pdf_file.read(), texto_usuario)
-            
-            if pdf_modificado_bytes:
-                st.success(f"✅ Archivo modificado: {pdf_file.name}")
-                st.download_button(
-                    label=f"⬇️ Descargar {pdf_file.name} modificado", 
-                    data=pdf_modificado_bytes, 
-                    file_name=f"Modificado_{pdf_file.name}",
-                    mime="application/pdf",
-                    key=f"btn_{pdf_file.name}"
-                )

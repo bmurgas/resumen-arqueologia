@@ -10,7 +10,6 @@ try:
 except ImportError:
     pass
 
-# --- Funciones Auxiliares solo para este módulo ---
 def limpiar_coordenada(texto):
     texto_limpio = str(texto).replace(".", "").replace(" ", "").strip()
     texto_limpio = texto_limpio.replace(",", ".")
@@ -39,7 +38,6 @@ def crear_kml_texto(puntos):
     </Placemark>"""
     return kml_header + kml_body + kml_footer
 
-# --- La lógica de extracción perfecta de ayer ---
 def procesar_pdf_recoleccion_regex_gis(pdf_bytes, nombre_archivo):
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -116,9 +114,8 @@ def procesar_pdf_recoleccion_regex_gis(pdf_bytes, nombre_archivo):
 
     return fichas
 
-# --- La Interfaz Visual de este módulo ---
 def ejecutar_interfaz():
-    st.title("Generador Base de Datos y GIS (Módulo Actualizado)")
+    st.title("Generador Base de Datos y GIS (Recolección Superficial)")
     st.markdown("Extrae datos mediante patrones lógicos (Regex) y convierte coordenadas UTM para QGIS y Google Earth.")
     
     archivos = st.file_uploader("Subir Fichas PDF (.pdf)", accept_multiple_files=True, key="pdf_recoleccion_up_nuevo")

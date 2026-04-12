@@ -720,6 +720,10 @@ elif opcion == "Generador Excel (Desde Word)":
             st.download_button("⬇️ Descargar Excel", buffer.getvalue(), "Resumen_Word_Excel.xlsx")
         else: st.error("No se encontraron datos.")
 
+# --- AGREGA ESTE BLOQUE AQUÍ ---
+elif opcion == "Generador Excel y GIS (Recolección Superficial)":
+    modulo_recoleccion.ejecutar_interfaz()
+# -------------------------------
 # 3. Generador Fichas (Desde Word)
 elif opcion == "Generador Fichas (Desde Word)":
     st.title("Generador de Fichas (Desde DOCX)")

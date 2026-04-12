@@ -5,7 +5,6 @@ from docx.oxml.ns import qn
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.section import WD_ORIENT
-import modulo_gis  # Importamos el archivo nuevo que acabamos de crear
 import io
 import pandas as pd
 import zipfile
@@ -14,6 +13,7 @@ import base64
 from pyproj import Transformer
 from datetime import datetime
 import locale
+import modulo_recoleccion
 
 # --- IMPORTACIÓN NUEVA PARA PDF ---
 try:
@@ -643,6 +643,7 @@ opcion = st.sidebar.radio("Herramientas:", [
     "Generador Word (MAP)", 
     "Generador Word MAP (Desde PDF)", 
     "Generador Excel (Desde Word)",
+    "Generador Excel y GIS (Recolección Superficial)", # <--- Cambia solo esta línea
     "Generador Fichas (Desde Word)",
     "Generador KMZ (Georreferenciación)",
     "Visor de Mapa Interactivo"

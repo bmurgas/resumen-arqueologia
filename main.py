@@ -10,7 +10,7 @@ import pandas as pd
 import zipfile
 import re
 import base64 
-import json 
+import json # <--- NUEVA IMPORTACIÓN PARA QGIS
 from pyproj import Transformer
 from datetime import datetime
 import locale
@@ -268,7 +268,7 @@ def procesar_pdf_a_word_map(pdf_bytes, nombre_archivo):
         for i, b in enumerate(bloques):
             txt = b[4].strip()
             
-            if "V. DESCRripciones" in txt or "Descripción de la Actividad" in txt or "V. DESCRIPCIONES" in txt:
+            if "V. DESCRripciones" in txt or "Descripción de la Actividad" in txt:
                 capturando_descripcion = True
                 continue 
 
@@ -388,7 +388,7 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
                 if i + 1 < len(lineas): ficha["Sitio"] = lineas[i+1]
             
             elif lin_lower == "hallazgo previsto":
-                pass 
+                pass # Se ignora, se captura abajo mediante Expresión Regular para 100% de precisión
             
             elif lin_lower == "cuadrante":
                 if i + 1 < len(lineas): ficha["Cuadrante"] = lineas[i+1]
@@ -429,16 +429,19 @@ def procesar_pdf_recoleccion_superficial(pdf_bytes, nombre_archivo):
                 elif i + 1 < len(lineas):
                     ficha["UTM Este"] = lineas[i+1]
 
+        # FASE DE LIMPIEZA
         etiquetas_conocidas = ["sitio", "responsable", "cuadrante", "dimensión", "dimension", "fecha", "material", "superficie", "coordenadas", "identificación", "procedencia y material cultural"]
         for key in list(ficha.keys()):
             val_limpio = str(ficha[key]).lower().strip()
             if val_limpio in etiquetas_conocidas or val_limpio == key.lower():
                 ficha[key] = ""
 
+        # RESPALDOS DE SEGURIDAD
         if not ficha["Fecha"]:
             m = re.search(r"(\d{2}/\d{2}/\d{4})", texto_completo)
             if m: ficha["Fecha"] = m.group(1)
 
+        # Buscar específicamente el ID del Hallazgo Previsto
         if not ficha["Hallazgo Previsto"] or len(ficha["Hallazgo Previsto"]) < 4:
             m = re.search(r"(HLU_HP_\d+|HP_\d+)", texto_completo)
             if m: ficha["Hallazgo Previsto"] = m.group(1)

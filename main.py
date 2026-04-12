@@ -94,7 +94,7 @@ def procesar_archivo_v12(archivo_bytes, nombre_archivo):
             texto_fila = " ".join([c.text.strip() for c in fila.cells]).strip()
             
             if "Fecha" in texto_fila:
-                for celda in cells:
+                for celda in fila.cells:
                     t = celda.text.strip()
                     if "Fecha" not in t and len(t) > 5:
                         datos_ficha["fecha_propia"] = t
@@ -671,14 +671,15 @@ def obtener_puntos_geograficos_con_foto(archivos):
     return puntos_acumulados
 
 # ==========================================
-# 6. LÓGICA NUEVA: MODIFICAR PDF (REESCRITURA CON AUTO-AJUSTE)
+# 6. LÓGICA NUEVA: MODIFICAR PDF (LLENAR EL VACÍO SIN BORRAR NADA)
 # ==========================================
 
 def modificar_pdf_agregar_texto(pdf_bytes, texto_a_agregar):
     """
-    Solución Definitiva: Extrae el párrafo, borra el original sin tocar las líneas
-    de la tabla, y reescribe el texto fusionado con un tamaño de fuente menor 
-    para que se adapte perfectamente al recuadro existente.
+    Busca la sección 'Descripción de la Actividad' y encuentra el espacio 
+    vacío exacto entre el final del párrafo y el siguiente título.
+    Usa ese espacio para inyectar el texto, reduciendo la fuente si es necesario, 
+    sin borrar ni alterar ninguna línea de la tabla original.
     """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -686,85 +687,65 @@ def modificar_pdf_agregar_texto(pdf_bytes, texto_a_agregar):
         for pagina in doc:
             dict_data = pagina.get_text("dict")
             bloques = dict_data.get("blocks", [])
-            bloques.sort(key=lambda b: b.get("bbox", [0, 0, 0, 0])[1])
             
             en_descripcion = False
-            target_lines = []
-            y_fin_celda = pagina.rect.height
-            
-            # 1. Identificar estrictamente las líneas del párrafo a modificar
+            last_line_bbox = None
+            next_section_y0 = None
+            margin_left = 60 # Margen izquierdo predeterminado seguro
+            margin_right = pagina.rect.width - 60
+
+            # 1. Aplastamos todas las líneas del PDF en una sola lista para leer en orden
+            all_lines = []
             for b in bloques:
-                if b.get("type") != 0: continue
-                texto_bloque = "".join([s["text"] for l in b.get("lines", []) for s in l.get("spans", [])]).strip()
-                
-                if "Descripción de la Actividad" in texto_bloque or "V. DESCRIPCIONES" in texto_bloque:
-                    en_descripcion = True
+                if b.get("type") == 0:
                     for l in b.get("lines", []):
-                        line_text = "".join([s["text"] for s in l.get("spans", [])]).strip()
-                        # Ignorar el título en sí mismo para no borrarlo
-                        if "Descripción de la Actividad" not in line_text and "V. DESCRIPCIONES" not in line_text and len(line_text) > 2:
-                            target_lines.append(l)
-                    continue
-                    
-                if en_descripcion:
-                    # Si chocamos con la siguiente sección de la ficha, ahí termina nuestra celda
-                    if "Presencia de Hallazgos" in texto_bloque or "VI. CARACTERÍSTICAS" in texto_bloque:
-                        y_fin_celda = b["bbox"][1] - 3 
+                        text = "".join([s["text"] for s in l.get("spans", [])]).strip()
+                        if text:
+                            all_lines.append({
+                                "text": text,
+                                "bbox": l["bbox"]
+                            })
+
+            # 2. Buscamos dónde termina el texto y dónde empieza el siguiente título
+            for l in all_lines:
+                text = l["text"]
+
+                # Si ya estamos en la descripción y encontramos el título de abajo, guardamos su coordenada superior
+                if "Presencia de Hallazgos" in text or "VI. CARACTERÍSTICAS" in text:
+                    if en_descripcion:
+                        next_section_y0 = l["bbox"][1]
                         break
-                    else:
-                        for l in b.get("lines", []):
-                            target_lines.append(l)
-            
-            if target_lines:
-                # 2. Rescatar el texto original y sus coordenadas
-                textos = []
-                x0_min = 9999
-                x1_max = 0
-                y0_min = 9999
-                
-                for l in target_lines:
-                    line_text = " ".join([s["text"] for s in l.get("spans", [])]).strip()
-                    textos.append(line_text)
-                    
-                    x0_min = min(x0_min, l["bbox"][0])
-                    x1_max = max(x1_max, l["bbox"][2])
-                    y0_min = min(y0_min, l["bbox"][1])
-                    
-                texto_original = " ".join(textos)
-                texto_original = re.sub(r'\s+', ' ', texto_original) 
-                
-                # Texto fusionado
-                texto_final = texto_original + " " + texto_a_agregar
-                
-                # 3. PINTAR DE BLANCO sobre el texto original (borrado láser línea a línea)
-                for l in target_lines:
-                    rect_borrar = fitz.Rect(l["bbox"])
-                    # Expandimos un píxel para borrar la tinta por completo sin afectar las tablas
-                    rect_borrar.x0 -= 2
-                    rect_borrar.y0 -= 1
-                    rect_borrar.x1 += 2
-                    rect_borrar.y1 += 1
-                    pagina.draw_rect(rect_borrar, color=(1, 1, 1), fill=(1, 1, 1))
-                    
-                # 4. Definir la zona segura (la celda vacía)
-                margen_derecho = max(x1_max, pagina.rect.width - 50)
-                if margen_derecho < x0_min + 150: 
-                    margen_derecho = pagina.rect.width - 50
-                    
-                rect_escritura = fitz.Rect(x0_min, y0_min, margen_derecho, y_fin_celda)
-                
-                # 5. Reescribir el texto adaptando el tamaño
-                # Un tamaño 8.0 es lo suficientemente pequeño para añadir una frase extra
-                # manteniendo la armonía del documento original.
-                pagina.insert_textbox(
-                    rect_escritura, 
-                    texto_final, 
-                    fontsize=8.0, 
-                    fontname="helv", 
-                    color=(0,0,0),
-                    align=0 # Justificado a la izquierda
-                )
-                break 
+
+                if "Descripción de la Actividad" in text or "V. DESCRIPCIONES" in text:
+                    en_descripcion = True
+                    continue
+
+                if en_descripcion:
+                    last_line_bbox = l["bbox"]
+                    # Calcular dinámicamente el margen izquierdo basándonos en el párrafo original
+                    if l["bbox"][0] > 30 and l["bbox"][0] < 150:
+                        margin_left = l["bbox"][0]
+
+            # 3. Si encontramos el hueco perfecto, insertamos el texto
+            if last_line_bbox and next_section_y0:
+                y_start = last_line_bbox[3] + 2 # Empezar 2 píxeles debajo de la última palabra
+                y_end = next_section_y0 - 2     # Terminar 2 píxeles arriba de la línea de "Presencia de Hallazgos"
+
+                # Verificamos que físicamente haya espacio (un hueco positivo)
+                if y_end > y_start:
+                    rect_escritura = fitz.Rect(margin_left, y_start, margin_right, y_end)
+
+                    # insert_textbox tiene la magia de encoger el texto (fontsize) automáticamente
+                    # para que quepa perfecto en la caja sin salirse ni tapar líneas.
+                    pagina.insert_textbox(
+                        rect_escritura,
+                        texto_a_agregar,
+                        fontsize=9.0,
+                        fontname="helv",
+                        color=(0,0,0),
+                        align=0 # Alinear a la izquierda
+                    )
+                    break 
                 
         buffer = io.BytesIO()
         doc.save(buffer)

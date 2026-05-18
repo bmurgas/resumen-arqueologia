@@ -7,6 +7,34 @@ try:
 except ImportError:
     pass
 
+def limpiar_coordenada(texto):
+    texto_limpio = str(texto).replace(".", "").replace(" ", "").strip()
+    texto_limpio = texto_limpio.replace(",", ".")
+    try:
+        return float(texto_limpio)
+    except:
+        return None
+
+def crear_kml_texto(puntos):
+    kml_header = """<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Hallazgos Arqueológicos</name>"""
+    kml_footer = """
+  </Document>
+</kml>"""
+    kml_body = ""
+    for p in puntos:
+        kml_body += f"""
+    <Placemark>
+      <name>{p['nombre']}</name>
+      <description>{p['desc']}</description>
+      <Point>
+        <coordinates>{p['lon']},{p['lat']},0</coordinates>
+      </Point>
+    </Placemark>"""
+    return kml_header + kml_body + kml_footer
+
 def extraer_datos_excavacion(pdf_bytes, nombre_archivo):
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -39,35 +67,73 @@ def extraer_datos_excavacion(pdf_bytes, nombre_archivo):
 
     lineas = [l.strip() for l in texto_completo.split('\n') if l.strip()]
 
-    # 1. Extracción de los datos de Cabecera (Identificación)
+    # 1. Extracción Matricial Robusta de Cabecera (Identificación)
     try:
-        m_sitio = re.search(r"(HLU-\d+|Sitio\s*([A-Za-z0-9\-]+))", texto_completo)
-        if m_sitio: ficha["Sitio"] = m_sitio.group(1).replace("Sitio", "").strip()
+        idx_sitio = -1
+        idx_unidad = -1
+        idx_norte = -1
+        idx_este = -1
+        idx_dim = -1
+        idx_fecha = -1
+        idx_resp = -1
         
-        m_unidad = re.search(r"(HLU-HP-\d+|Unidad\s*([A-Za-z0-9\-]+))", texto_completo)
-        if m_unidad: ficha["Unidad"] = m_unidad.group(1).replace("Unidad", "").strip()
+        for idx, l in enumerate(lineas):
+            l_clean = l.lower().strip()
+            if l_clean == "sitio": idx_sitio = idx
+            elif l_clean == "unidad": idx_unidad = idx
+            elif l_clean == "c. norte": idx_norte = idx
+            elif l_clean == "c. este": idx_este = idx
+            elif l_clean == "dimensión" or l_clean == "dimension": idx_dim = idx
+            elif l_clean == "fecha": idx_fecha = idx
+            elif l_clean == "responsable": idx_resp = idx
 
-        m_norte = re.search(r"C\. Norte\s*\n+(\d+)", texto_completo)
-        if m_norte: ficha["C. Norte"] = m_norte.group(1)
+        # Si detectamos la estructura en bloque de etiquetas consecutivas
+        if idx_resp != -1 and idx_sitio != -1 and (idx_resp - idx_sitio == 6):
+            offset = 7
+            if idx_sitio + offset < len(lineas): ficha["Sitio"] = lineas[idx_sitio + offset].strip()
+            if idx_unidad + offset < len(lineas): ficha["Unidad"] = lineas[idx_unidad + offset].strip()
+            if idx_norte + offset < len(lineas): ficha["C. Norte"] = lineas[idx_norte + offset].strip()
+            if idx_este + offset < len(lineas): ficha["C. Este"] = lineas[idx_este + offset].strip()
+            if idx_dim + offset < len(lineas): ficha["Dimensión"] = lineas[idx_dim + offset].strip()
+            if idx_fecha + offset < len(lineas): ficha["Fecha"] = lineas[idx_fecha + offset].strip()
+            if idx_resp + offset < len(lineas): ficha["Responsable"] = lineas[idx_resp + offset].strip()
+        
+        # Respaldos Regex individuales en caso de quiebres de lectura inesperados
+        if not ficha["Sitio"]:
+            m = re.search(r"(HLU-\d+|Sitio\s*([A-Za-z0-9\-]+))", texto_completo)
+            if m: ficha["Sitio"] = m.group(1).replace("Sitio", "").strip()
+            
+        if not ficha["Unidad"]:
+            m = re.search(r"(HLU-HP-\d+|Unidad\s*([A-Za-z0-9\-]+))", texto_completo)
+            if m: ficha["Unidad"] = m.group(1).replace("Unidad", "").strip()
 
-        m_este = re.search(r"C\. Este\s*\n+(\d+)", texto_completo)
-        if m_este: ficha["C. Este"] = m_este.group(1)
+        if not ficha["C. Norte"]:
+            m = re.search(r"C\. Norte\s*\n+(\d+)", texto_completo)
+            if m: ficha["C. Norte"] = m.group(1)
 
-        m_dim = re.search(r"(\d+\s*[mM]\s*[xX]\s*\d+\s*[mM])", texto_completo)
-        if m_dim: ficha["Dimensión"] = m_dim.group(1)
+        if not ficha["C. Este"]:
+            m = re.search(r"C\. Este\s*\n+(\d+)", texto_completo)
+            if m: ficha["C. Este"] = m.group(1)
 
-        m_fecha = re.search(r"(\d{2}[-/]\d{2}[-/]\d{4})", texto_completo)
-        if m_fecha: ficha["Fecha"] = m_fecha.group(1)
+        if not ficha["Dimensión"]:
+            m = re.search(r"(\d+\s*[mM]\s*[xX]\s*\d+\s*[mM])", texto_completo)
+            if m: ficha["Dimensión"] = m.group(1)
 
-        for j, l in enumerate(lineas):
-            if l == ficha["Fecha"] and j + 1 < len(lineas):
-                if not re.match(r"^\d", lineas[j+1]): 
-                    ficha["Responsable"] = lineas[j+1]
-                    break
+        if not ficha["Fecha"]:
+            m = re.search(r"(\d{2}[-/]\d{2}[-/]\d{4})", texto_completo)
+            if m: ficha["Fecha"] = m.group(1)
+
+        if not ficha["Responsable"] or ficha["Responsable"].lower() == "responsable":
+            if ficha["Fecha"]:
+                for j, l in enumerate(lineas):
+                    if l.strip() == ficha["Fecha"] and j + 1 < len(lineas):
+                        if "superficial" not in lineas[j+1].lower() and "capa" not in lineas[j+1].lower():
+                            ficha["Responsable"] = lineas[j+1].strip()
+                            break
     except:
         pass
 
-    # 2. Extracción de la Tabla de Materiales por Nivel (CANDADO ANTI-ERRORES)
+    # 2. Extracción de la Tabla de Materiales por Nivel (Con candado de protección)
     niveles_map = {
         "superficial": "_Sup",
         "0-10": "_I",
@@ -80,7 +146,6 @@ def extraer_datos_excavacion(pdf_bytes, nombre_archivo):
     for i, linea in enumerate(lineas):
         linea_lower = linea.lower()
         
-        # EL CANDADO: Si la línea menciona observaciones o fotos, lo saltamos rotundamente
         if "observaci" in linea_lower or "registro" in linea_lower or "foto" in linea_lower:
             continue
 
@@ -91,10 +156,7 @@ def extraer_datos_excavacion(pdf_bytes, nombre_archivo):
                 break
         
         if sufijo_actual and (i + 8) < len(lineas):
-            # SEGUNDO CANDADO: Solo guardamos si esa capa está vacía (evita que se sobreescriba)
             if not ficha[f"Capa{sufijo_actual}"]:
-                
-                # Para estar 100% seguros, revisamos que haya números en los materiales
                 materiales = [lineas[i+2], lineas[i+3], lineas[i+4], lineas[i+5], lineas[i+6], lineas[i+7], lineas[i+8]]
                 numeros_encontrados = sum(1 for m in materiales if m.isdigit() or m == "0")
                 
@@ -122,16 +184,19 @@ def extraer_datos_excavacion(pdf_bytes, nombre_archivo):
 
             if sufijo_obs:
                 obs_texto = ""
-                # Si hay texto después de los dos puntos
                 if ":" in linea:
                     obs_texto = linea.split(":", 1)[1].strip()
-                
-                # Si no había texto al lado, tomamos la línea de abajo
                 if not obs_texto and i + 1 < len(lineas):
                     if "registro" not in lineas[i+1].lower() and "observaci" not in lineas[i+1].lower():
                         obs_texto = lineas[i+1].strip()
-                
                 ficha[f"Obs{sufijo_obs}"] = obs_texto
+
+    # FASE DE LIMPIEZA DE ETIQUETAS RESIDUALES
+    etiquetas_conocidas = ["sitio", "responsable", "cuadrante", "dimensión", "dimension", "fecha", "material", "superficie", "coordenadas", "identificación", "procedencia y material cultural"]
+    for key in list(ficha.keys()):
+        val_limpio = str(ficha[key]).lower().strip()
+        if val_limpio in etiquetas_conocidas or val_limpio == key.lower():
+            ficha[key] = ""
 
     return ficha
 
@@ -154,11 +219,10 @@ def ejecutar_interfaz():
         if datos_extraidos:
             df = pd.DataFrame(datos_extraidos)
             
-            # 1. MOSTRAR EN PANTALLA
             st.success(f"✅ Se procesaron {len(datos_extraidos)} fichas de excavación.")
             st.dataframe(df)
 
-            # 2. GENERAR EXCEL
+            # ESTRUCTURA DE ENCABEZADO MULTINIVEL EXACTA
             fila1 = (
                 ["", "", "", "", "", "", ""] + 
                 ["Superficial"] + [""] * 7 + 

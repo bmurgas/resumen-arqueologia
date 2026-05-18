@@ -14,6 +14,7 @@ from pyproj import Transformer
 from datetime import datetime
 import locale
 import modulo_recoleccion
+import modulo_excavacion
 
 # --- IMPORTACIÓN NUEVA PARA PDF ---
 try:
@@ -644,6 +645,7 @@ opcion = st.sidebar.radio("Herramientas:", [
     "Generador Word MAP (Desde PDF)", 
     "Generador Excel (Desde Word)",
     "Generador Excel y GIS (Recolección Superficial)", # <--- Cambia solo esta línea
+    "Generador Excel (Fichas de Excavación)",
     "Generador Fichas (Desde Word)",
     "Generador KMZ (Georreferenciación)",
     "Visor de Mapa Interactivo"
@@ -723,6 +725,10 @@ elif opcion == "Generador Excel (Desde Word)":
 # --- AGREGA ESTE BLOQUE AQUÍ ---
 elif opcion == "Generador Excel y GIS (Recolección Superficial)":
     modulo_recoleccion.ejecutar_interfaz()
+# -------------------------------
+# --- NUEVO MÓDULO EXCAVACIÓN ---
+elif opcion == "Generador Excel (Fichas de Excavación)":
+    modulo_excavacion.ejecutar_interfaz()
 # -------------------------------
 # 3. Generador Fichas (Desde Word)
 elif opcion == "Generador Fichas (Desde Word)":

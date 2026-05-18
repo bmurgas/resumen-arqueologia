@@ -1,4 +1,4 @@
-import streamlit as st
+import streamlit st
 import pandas as pd
 import io
 import re
@@ -67,7 +67,7 @@ def extraer_datos_excavacion(pdf_bytes, nombre_archivo):
 
     lineas = [l.strip() for l in texto_completo.split('\n') if l.strip()]
 
-    # 1. Extracción Matricial Robusta de Cabecera (Identificación)
+    # 1. Extracción Matricial de Cabecera (Con freno para la primera coincidencia)
     try:
         idx_sitio = -1
         idx_unidad = -1
@@ -77,17 +77,17 @@ def extraer_datos_excavacion(pdf_bytes, nombre_archivo):
         idx_fecha = -1
         idx_resp = -1
         
+        # El "and idx_xxx == -1" asegura capturar estrictamente el bloque de la tabla superior
         for idx, l in enumerate(lineas):
             l_clean = l.lower().strip()
-            if l_clean == "sitio": idx_sitio = idx
-            elif l_clean == "unidad": idx_unidad = idx
-            elif l_clean == "c. norte": idx_norte = idx
-            elif l_clean == "c. este": idx_este = idx
-            elif l_clean == "dimensión" or l_clean == "dimension": idx_dim = idx
-            elif l_clean == "fecha": idx_fecha = idx
-            elif l_clean == "responsable": idx_resp = idx
+            if l_clean == "sitio" and idx_sitio == -1: idx_sitio = idx
+            elif l_clean == "unidad" and idx_unidad == -1: idx_unidad = idx
+            elif l_clean == "c. norte" and idx_norte == -1: idx_norte = idx
+            elif l_clean == "c. este" and idx_este == -1: idx_este = idx
+            elif (l_clean == "dimensión" or l_clean == "dimension") and idx_dim == -1: idx_dim = idx
+            elif l_clean == "fecha" and idx_fecha == -1: idx_fecha = idx
+            elif l_clean == "responsable" and idx_resp == -1: idx_resp = idx
 
-        # Si detectamos la estructura en bloque de etiquetas consecutivas
         if idx_resp != -1 and idx_sitio != -1 and (idx_resp - idx_sitio == 6):
             offset = 7
             if idx_sitio + offset < len(lineas): ficha["Sitio"] = lineas[idx_sitio + offset].strip()
@@ -98,7 +98,7 @@ def extraer_datos_excavacion(pdf_bytes, nombre_archivo):
             if idx_fecha + offset < len(lineas): ficha["Fecha"] = lineas[idx_fecha + offset].strip()
             if idx_resp + offset < len(lineas): ficha["Responsable"] = lineas[idx_resp + offset].strip()
         
-        # Respaldos Regex individuales en caso de quiebres de lectura inesperados
+        # Respaldos Regex individuales por seguridad
         if not ficha["Sitio"]:
             m = re.search(r"(HLU-\d+|Sitio\s*([A-Za-z0-9\-]+))", texto_completo)
             if m: ficha["Sitio"] = m.group(1).replace("Sitio", "").strip()
@@ -123,17 +123,17 @@ def extraer_datos_excavacion(pdf_bytes, nombre_archivo):
             m = re.search(r"(\d{2}[-/]\d{2}[-/]\d{4})", texto_completo)
             if m: ficha["Fecha"] = m.group(1)
 
+        # SEGURO DIRECTO: Si falló la matriz, busca el texto inmediatamente continuo a la fecha
         if not ficha["Responsable"] or ficha["Responsable"].lower() == "responsable":
-            if ficha["Fecha"]:
-                for j, l in enumerate(lineas):
-                    if l.strip() == ficha["Fecha"] and j + 1 < len(lineas):
-                        if "superficial" not in lineas[j+1].lower() and "capa" not in lineas[j+1].lower():
-                            ficha["Responsable"] = lineas[j+1].strip()
-                            break
+            m_resp = re.search(r"(\d{2}[-/]\d{2}[-/]\d{4})\s*\n+([A-Za-zÁéíóúÁÉÍÓÚñÑ\s]+)(?:\n|$)", texto_completo)
+            if m_resp:
+                cand_nombre = m_resp.group(2).strip()
+                if cand_nombre and "nivel" not in cand_nombre.lower() and "capa" not in cand_nombre.lower():
+                    ficha["Responsable"] = cand_nombre
     except:
         pass
 
-    # 2. Extracción de la Tabla de Materiales por Nivel (Con candado de protección)
+    # 2. Extracción de la Tabla de Materiales por Nivel
     niveles_map = {
         "superficial": "_Sup",
         "0-10": "_I",

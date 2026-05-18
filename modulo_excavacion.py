@@ -14,7 +14,7 @@ def extraer_datos_excavacion(pdf_bytes, nombre_archivo):
         st.error(f"Error abriendo PDF {nombre_archivo}: {e}")
         return None
 
-    # Diccionario base con sufijos únicos para que no falle al mostrarse en pantalla
+    # Diccionario base con sufijos únicos
     ficha = {
         "Sitio": "", "Unidad": "", "C. Norte": "", "C. Este": "", "Dimensión": "", "Fecha": "", "Responsable": "",
         # Nivel Superficial
@@ -67,7 +67,7 @@ def extraer_datos_excavacion(pdf_bytes, nombre_archivo):
     except:
         pass
 
-    # 2. Extracción de la Tabla de Materiales por Nivel
+    # 2. Extracción de la Tabla de Materiales por Nivel (CANDADO ANTI-ERRORES)
     niveles_map = {
         "superficial": "_Sup",
         "0-10": "_I",
@@ -79,30 +79,59 @@ def extraer_datos_excavacion(pdf_bytes, nombre_archivo):
 
     for i, linea in enumerate(lineas):
         linea_lower = linea.lower()
-        sufijo_actual = None
         
+        # EL CANDADO: Si la línea menciona observaciones o fotos, lo saltamos rotundamente
+        if "observaci" in linea_lower or "registro" in linea_lower or "foto" in linea_lower:
+            continue
+
+        sufijo_actual = None
         for clave, sufijo in niveles_map.items():
             if clave in linea_lower:
                 sufijo_actual = sufijo
                 break
         
         if sufijo_actual and (i + 8) < len(lineas):
-            # Se asegura de no capturar encabezados cruzados
-            if "disturbada" in lineas[i+1].lower() or len(lineas[i+1]) < 15:
-                ficha[f"Capa{sufijo_actual}"] = lineas[i+1]
-                ficha[f"Litico{sufijo_actual}"] = lineas[i+2]
-                ficha[f"Osteofauna{sufijo_actual}"] = lineas[i+3]
-                ficha[f"Malacologico{sufijo_actual}"] = lineas[i+4]
-                ficha[f"Vidrio{sufijo_actual}"] = lineas[i+5]
-                ficha[f"Metal{sufijo_actual}"] = lineas[i+6]
-                ficha[f"Ceramica{sufijo_actual}"] = lineas[i+7]
-                ficha[f"Otros{sufijo_actual}"] = lineas[i+8]
+            # SEGUNDO CANDADO: Solo guardamos si esa capa está vacía (evita que se sobreescriba)
+            if not ficha[f"Capa{sufijo_actual}"]:
+                
+                # Para estar 100% seguros, revisamos que haya números en los materiales
+                materiales = [lineas[i+2], lineas[i+3], lineas[i+4], lineas[i+5], lineas[i+6], lineas[i+7], lineas[i+8]]
+                numeros_encontrados = sum(1 for m in materiales if m.isdigit() or m == "0")
+                
+                if numeros_encontrados >= 3 or len(lineas[i+1]) <= 15:
+                    ficha[f"Capa{sufijo_actual}"] = lineas[i+1]
+                    ficha[f"Litico{sufijo_actual}"] = lineas[i+2]
+                    ficha[f"Osteofauna{sufijo_actual}"] = lineas[i+3]
+                    ficha[f"Malacologico{sufijo_actual}"] = lineas[i+4]
+                    ficha[f"Vidrio{sufijo_actual}"] = lineas[i+5]
+                    ficha[f"Metal{sufijo_actual}"] = lineas[i+6]
+                    ficha[f"Ceramica{sufijo_actual}"] = lineas[i+7]
+                    ficha[f"Otros{sufijo_actual}"] = lineas[i+8]
 
-    # 3. Observaciones
+    # 3. Extracción de Observaciones Reales
     for i, linea in enumerate(lineas):
         linea_lower = linea.lower()
         if "observaci" in linea_lower:
-            pass 
+            sufijo_obs = None
+            if "superficial" in linea_lower: sufijo_obs = "_Sup"
+            elif "0-10" in linea_lower or " i " in linea_lower or " 1 " in linea_lower: sufijo_obs = "_I"
+            elif "10-20" in linea_lower or " ii " in linea_lower or " 2 " in linea_lower: sufijo_obs = "_II"
+            elif "20-30" in linea_lower or " iii " in linea_lower or " 3 " in linea_lower: sufijo_obs = "_III"
+            elif "30-40" in linea_lower or " iv " in linea_lower or " 4 " in linea_lower: sufijo_obs = "_IV"
+            elif "40-50" in linea_lower or " v " in linea_lower or " 5 " in linea_lower: sufijo_obs = "_V"
+
+            if sufijo_obs:
+                obs_texto = ""
+                # Si hay texto después de los dos puntos
+                if ":" in linea:
+                    obs_texto = linea.split(":", 1)[1].strip()
+                
+                # Si no había texto al lado, tomamos la línea de abajo
+                if not obs_texto and i + 1 < len(lineas):
+                    if "registro" not in lineas[i+1].lower() and "observaci" not in lineas[i+1].lower():
+                        obs_texto = lineas[i+1].strip()
+                
+                ficha[f"Obs{sufijo_obs}"] = obs_texto
 
     return ficha
 
@@ -125,11 +154,11 @@ def ejecutar_interfaz():
         if datos_extraidos:
             df = pd.DataFrame(datos_extraidos)
             
-            # 1. MOSTRAR EN PANTALLA: Usamos el dataframe con columnas únicas para evitar el error de PyArrow
+            # 1. MOSTRAR EN PANTALLA
             st.success(f"✅ Se procesaron {len(datos_extraidos)} fichas de excavación.")
             st.dataframe(df)
 
-            # 2. GENERAR EXCEL: Construimos manualmente las dos filas de encabezados para igualar tu CSV
+            # 2. GENERAR EXCEL
             fila1 = (
                 ["", "", "", "", "", "", ""] + 
                 ["Superficial"] + [""] * 7 + 
@@ -148,15 +177,11 @@ def ejecutar_interfaz():
                 "Observacion nivel III (20-30 cm):", "Observacion nivel IV (30-40 cm):", "Observacion nivel V (40-50 cm):"
             ]
 
-            # Juntamos los títulos con los datos reales
             datos_excel = [fila1, fila2] + df.values.tolist()
-            
-            # Creamos un dataframe ciego para exportar
             df_export = pd.DataFrame(datos_excel)
 
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                # header=False le dice a Pandas que no invente títulos numéricos y use nuestras filas
                 df_export.to_excel(writer, index=False, header=False, sheet_name="Hoja1")
             
             st.download_button(

@@ -11,6 +11,7 @@ import zipfile
 import re
 import base64 
 from pyproj import Transformer
+import extractor_kmz
 from datetime import datetime
 import locale
 import modulo_recoleccion
@@ -648,7 +649,8 @@ opcion = st.sidebar.radio("Herramientas:", [
     "Generador Excel (Fichas de Excavación)",
     "Generador Fichas (Desde Word)",
     "Generador KMZ (Georreferenciación)",
-    "Visor de Mapa Interactivo"
+    "Visor de Mapa Interactivo",
+    "Extractor KMZ/KML a Excel"
 ])
 
 # 1. Generador Word (MAP - Desde Word)
@@ -850,3 +852,6 @@ elif opcion == "Visor de Mapa Interactivo":
             ).add_to(m)
         
         st_folium(m, width=900, height=600)
+        # 6. Extractor KMZ/KML a Excel (LLAMADA AL ARCHIVO EXTERNO)
+elif opcion == "Extractor KMZ/KML a Excel":
+    extractor_kmz.mostrar_pagina()

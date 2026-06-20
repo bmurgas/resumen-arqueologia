@@ -9,15 +9,15 @@ from pyproj import Transformer # Importamos para la conversión a UTM
 def extraer_datos_kml(kml_content):
     """
     Lee el código XML de un archivo KML, extrae los puntos
-    y convierte sus coordenadas geográficas a UTM Huso 18S.
+    y convierte sus coordenadas geográficas a UTM Huso 19S (19K).
     """
     xml_string = kml_content.decode('utf-8', errors='ignore')
     xml_string = re.sub(r'\sxmlns="[^"]+"', '', xml_string, count=1)
     
     try:
         root = ET.fromstring(xml_string)
-        # Configurar conversor: WGS84 (Lat/Lon) -> UTM Huso 18S (EPSG:32718)
-        transformer = Transformer.from_crs("epsg:4326", "epsg:32718", always_xy=True)
+        # CONFIGURACIÓN: WGS84 (Lat/Lon) -> UTM Huso 19S / EPSG:32719 (Huso 19K)
+        transformer = Transformer.from_crs("epsg:4326", "epsg:32719", always_xy=True)
     except Exception:
         return []
 
@@ -44,10 +44,10 @@ def extraer_datos_kml(kml_content):
                 try:
                     lon_float = float(lon_str)
                     lat_float = float(lat_str)
-                    # Transformación matemática a metros (UTM)
+                    # Transformación matemática a metros (UTM Huso 19)
                     este_float, norte_float = transformer.transform(lon_float, lat_float)
                     
-                    # Formatear como números enteros o con 2 decimales para el Excel
+                    # Redondeamos a 2 decimales para el Excel
                     utm_este = round(este_float, 2)
                     utm_norte = round(norte_float, 2)
                 except:
@@ -57,8 +57,8 @@ def extraer_datos_kml(kml_content):
                 "Nombre del Punto": nombre_txt,
                 "Latitud (Y)": lat_str,
                 "Longitud (X)": lon_str,
-                "UTM Este (X)": utm_este,
-                "UTM Norte (Y)": utm_norte,
+                "UTM Este (X) - Huso 19": utm_este,
+                "UTM Norte (Y) - Huso 19": utm_norte,
                 "Altura (Z)": alt
             })
 
@@ -66,15 +66,15 @@ def extraer_datos_kml(kml_content):
 
 def mostrar_pagina():
     """Función principal que es llamada desde el menú de main.py"""
-    st.title("🗺️ Extractor de KMZ/KML a Excel (Con UTM)")
-    st.markdown("Sube tus archivos geográficos para extraer sus datos en coordenadas Geográficas y **UTM (Huso 18S)**.")
+    st.title("🗺️ Extractor de KMZ/KML a Excel (Huso 19K)")
+    st.markdown("Sube tus archivos geográficos para extraer sus datos en coordenadas Geográficas y **UTM (Huso 19K)**.")
     
     archivos = st.file_uploader("Sube tus archivos (.kml o .kmz)", type=['kml', 'kmz'], accept_multiple_files=True, key="kmz_to_excel_up")
 
     if archivos and st.button("Extraer Datos a Excel"):
         todos_los_puntos = []
         
-        with st.spinner("Procesando archivos y calculando coordenadas UTM..."):
+        with st.spinner("Procesando archivos y calculando coordenadas UTM Huso 19..."):
             for archivo in archivos:
                 nombre_archivo = archivo.name
                 contenido = archivo.read()
@@ -98,29 +98,29 @@ def mostrar_pagina():
         if todos_los_puntos:
             df = pd.DataFrame(todos_los_puntos)
             
-            # Ordenamos las columnas incluyendo los nuevos datos UTM
+            # Ordenamos las columnas incluyendo los nuevos datos UTM Huso 19
             columnas = [
                 "Archivo Origen", 
                 "Nombre del Punto", 
-                "UTM Este (X)", 
-                "UTM Norte (Y)", 
+                "UTM Este (X) - Huso 19", 
+                "UTM Norte (Y) - Huso 19", 
                 "Latitud (Y)", 
                 "Longitud (X)", 
                 "Altura (Z)"
             ]
             df = df[columnas]
 
-            st.success(f"✅ ¡Éxito! Se extrajeron {len(df)} puntos con sus respectivas coordenadas UTM.")
+            st.success(f"✅ ¡Éxito! Se extrajeron {len(df)} puntos con coordenadas UTM calculadas para el Huso 19.")
             st.dataframe(df)
 
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False, sheet_name="Coordenadas_UTM")
+                df.to_excel(writer, index=False, sheet_name="Coordenadas_UTM_19S")
 
             st.download_button(
                 label="⬇️ Descargar Planilla Excel",
                 data=buffer.getvalue(),
-                file_name="Coordenadas_Extraidas_UTM.xlsx",
+                file_name="Coordenadas_Extraidas_UTM_19.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
